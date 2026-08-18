@@ -15,6 +15,7 @@ import io
 import json
 import hashlib
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -150,12 +151,26 @@ db_init()
 
 class SessionHub:
     """Holds WebSocket connections per session and broadcasts progress updates."""
+
+    MAX_SESSIONS = 1000
+    MAX_SOCKETS_PER_SESSION = 8
+
     def __init__(self) -> None:
         self.sessions: Dict[str, List[WebSocket]] = {}
 
-    async def connect(self, session_id: str, ws: WebSocket) -> None:
-        """Register a newly accepted WebSocket under the given session id."""
-        self.sessions.setdefault(session_id, []).append(ws)
+    async def connect(self, session_id: str, ws: WebSocket) -> bool:
+        """Register a newly accepted WebSocket under the given session id.
+
+        Returns False (without registering) when session or per-session
+        socket limits are exceeded, so a client cannot grow the hub unboundedly.
+        """
+        if session_id not in self.sessions and len(self.sessions) >= self.MAX_SESSIONS:
+            return False
+        bucket = self.sessions.setdefault(session_id, [])
+        if len(bucket) >= self.MAX_SOCKETS_PER_SESSION:
+            return False
+        bucket.append(ws)
+        return True
 
     def _cleanup_closed(self, session_id: str) -> None:
         """Drop closed sockets and cleanup empty session buckets."""
@@ -221,6 +236,65 @@ def sanitize_filename(name: Optional[str]) -> str:
             cleaned_chars.append(ch)
     cleaned = ''.join(cleaned_chars).strip()
     return cleaned or "file"
+
+# ---------- Input validation ----------
+
+# Invite tokens are generated server-side as uuid4().hex: exactly 32 lowercase hex chars.
+INVITE_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+# session_id / item_id come from crypto.randomUUID() or a base36 fallback in the frontend.
+# The lookahead rejects dot-only names ("." / "..") since these ids are used as directory names.
+CLIENT_ID_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9._:-]{1,64}$")
+# fingerprint is "<uuid>:<digits>" (or bare device id) from the frontend.
+FINGERPRINT_RE = re.compile(r"^[A-Za-z0-9._:|-]{1,128}$")
+# Immich album ids are UUIDs.
+ALBUM_ID_RE = re.compile(r"^[0-9a-fA-F-]{1,64}$")
+
+MAX_NAME_LEN = 255
+MAX_PASSWORD_LEN = 256
+MAX_TOKENS_PER_REQUEST = 1000
+MAX_CHUNKS = 100_000
+# Upper bound for client-supplied epoch-millis timestamps (year 3000).
+MAX_EPOCH_MS = 32_503_680_000_000
+
+def is_valid_invite_token(token) -> bool:
+    """True if token looks like a server-generated invite token (uuid4 hex)."""
+    return isinstance(token, str) and bool(INVITE_TOKEN_RE.fullmatch(token))
+
+def is_valid_client_id(value) -> bool:
+    """True if value is a plausible client-generated session/item id."""
+    return isinstance(value, str) and bool(CLIENT_ID_RE.fullmatch(value))
+
+def clean_fingerprint(value) -> str:
+    """Return the fingerprint if well-formed, else empty string."""
+    if isinstance(value, str) and FINGERPRINT_RE.fullmatch(value):
+        return value
+    return ""
+
+def parse_epoch_ms(value) -> Optional[int]:
+    """Coerce a client-supplied epoch-millis value to int, or None if implausible."""
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 < ms <= MAX_EPOCH_MS:
+        return ms
+    return None
+
+def parse_nonneg_int(value, max_value: int) -> Optional[int]:
+    """Coerce value to a non-negative int no larger than max_value, else None."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= n <= max_value:
+        return n
+    return None
+
+def clean_text(value, max_len: int) -> Optional[str]:
+    """Return value as a stripped, length-capped string, or None if not a string."""
+    if not isinstance(value, str):
+        return None
+    return value.strip()[:max_len]
 
 def read_exif_datetimes(file_bytes: bytes):
     """
@@ -434,21 +508,54 @@ async def api_config() -> dict:
         "chunk_size_mb": SETTINGS.chunk_size_mb,
     }
 
+def _ws_origin_allowed(ws: WebSocket) -> bool:
+    """Reject cross-site WebSocket handshakes (browsers always send Origin).
+
+    Non-browser clients without an Origin header are allowed. The origin must
+    match the request's Host, or the configured PUBLIC_BASE_URL host.
+    """
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True
+    from urllib.parse import urlparse
+    try:
+        origin_host = (urlparse(origin).netloc or "").lower()
+    except Exception:
+        return False
+    if not origin_host:
+        return False
+    allowed = {(ws.headers.get("host") or "").lower()}
+    try:
+        if SETTINGS.public_base_url:
+            allowed.add((urlparse(SETTINGS.public_base_url).netloc or "").lower())
+    except Exception:
+        pass
+    allowed.discard("")
+    return origin_host in allowed
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     """WebSocket endpoint for pushing per-item upload progress."""
+    if not _ws_origin_allowed(ws):
+        # Policy violation: refuse the handshake without accepting
+        await ws.close(code=1008)
+        return
     await ws.accept()
     try:
         init = await ws.receive_text()
         data = json.loads(init)
         session_id = data.get("session_id") or "default"
+        if not is_valid_client_id(session_id):
+            session_id = "default"
     except Exception:
         session_id = "default"
     # If this is the first socket for a (possibly new) session, reset album cache
     # so a freshly opened page can rotate the drop album by renaming the old one.
     if session_id not in hub.sessions:
         reset_album_cache()
-    await hub.connect(session_id, ws)
+    if not await hub.connect(session_id, ws):
+        await ws.close(code=1013)  # try again later: connection limit reached
+        return
 
     # keepalive to avoid proxy idle timeouts
     try:
@@ -476,6 +583,13 @@ async def api_upload(
     fingerprint: Optional[str] = Form(None),
 ):
     """Receive a file, check duplicates, forward to Immich; stream progress via WS."""
+    if not is_valid_client_id(session_id) or not is_valid_client_id(item_id):
+        return JSONResponse({"error": "invalid_ids"}, status_code=400)
+    if invite_token is not None and not is_valid_invite_token(invite_token):
+        await send_progress(session_id, item_id, "error", 100, "Invalid invite token")
+        return JSONResponse({"error": "invalid_invite"}, status_code=403)
+    fingerprint = clean_fingerprint(fingerprint)
+    last_modified = parse_epoch_ms(last_modified)
     raw = await file.read()
     size = len(raw)
     checksum = sha1_hex(raw)
@@ -716,9 +830,11 @@ async def api_upload(
 # --------- Chunked upload endpoints ---------
 
 def _chunk_dir(session_id: str, item_id: str) -> str:
-    safe_session = session_id.replace('/', '_')
-    safe_item = item_id.replace('/', '_')
-    return os.path.join(CHUNK_ROOT, safe_session, safe_item)
+    # ids must already be validated; re-check here so no caller can ever
+    # place path separators or ".." segments under CHUNK_ROOT
+    if not (is_valid_client_id(session_id) and is_valid_client_id(item_id)):
+        raise ValueError("invalid session/item id")
+    return os.path.join(CHUNK_ROOT, session_id, item_id)
 
 @app.post("/api/upload/chunk/init")
 async def api_upload_chunk_init(request: Request) -> JSONResponse:
@@ -731,16 +847,21 @@ async def api_upload_chunk_init(request: Request) -> JSONResponse:
     session_id = (data or {}).get("session_id")
     if not item_id or not session_id:
         return JSONResponse({"error": "missing_ids"}, status_code=400)
+    if not is_valid_client_id(session_id) or not is_valid_client_id(item_id):
+        return JSONResponse({"error": "invalid_ids"}, status_code=400)
+    invite_token = (data or {}).get("invite_token")
+    if invite_token is not None and not is_valid_invite_token(invite_token):
+        return JSONResponse({"error": "invalid_invite"}, status_code=403)
     d = _chunk_dir(session_id, item_id)
     try:
         os.makedirs(d, exist_ok=True)
         # Write manifest for later use
         meta = {
-            "name": (data or {}).get("name"),
-            "size": (data or {}).get("size"),
-            "last_modified": (data or {}).get("last_modified"),
-            "invite_token": (data or {}).get("invite_token"),
-            "content_type": (data or {}).get("content_type") or "application/octet-stream",
+            "name": clean_text((data or {}).get("name"), MAX_NAME_LEN),
+            "size": parse_nonneg_int((data or {}).get("size"), 1 << 40),
+            "last_modified": parse_epoch_ms((data or {}).get("last_modified")),
+            "invite_token": invite_token,
+            "content_type": clean_text((data or {}).get("content_type"), 100) or "application/octet-stream",
             "created_at": datetime.utcnow().isoformat(),
         }
         with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
@@ -761,6 +882,12 @@ async def api_upload_chunk(
     chunk: UploadFile = Form(...),
 ) -> JSONResponse:
     """Receive a single chunk; write to disk under chunk directory."""
+    if not is_valid_client_id(session_id) or not is_valid_client_id(item_id):
+        return JSONResponse({"error": "invalid_ids"}, status_code=400)
+    if invite_token is not None and not is_valid_invite_token(invite_token):
+        return JSONResponse({"error": "invalid_invite"}, status_code=403)
+    if not (0 < total_chunks <= MAX_CHUNKS) or not (0 <= chunk_index < total_chunks):
+        return JSONResponse({"error": "invalid_chunk_index"}, status_code=400)
     d = _chunk_dir(session_id, item_id)
     try:
         os.makedirs(d, exist_ok=True)
@@ -797,13 +924,17 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
     item_id = (data or {}).get("item_id")
     session_id = (data or {}).get("session_id")
-    name = (data or {}).get("name") or "upload.bin"
-    last_modified = (data or {}).get("last_modified")
+    name = clean_text((data or {}).get("name"), MAX_NAME_LEN) or "upload.bin"
+    last_modified = parse_epoch_ms((data or {}).get("last_modified"))
     invite_token = (data or {}).get("invite_token")
-    fingerprint = (data or {}).get("fingerprint")
-    content_type = (data or {}).get("content_type") or "application/octet-stream"
+    fingerprint = clean_fingerprint((data or {}).get("fingerprint"))
+    content_type = clean_text((data or {}).get("content_type"), 100) or "application/octet-stream"
     if not item_id or not session_id:
         return JSONResponse({"error": "missing_ids"}, status_code=400)
+    if not is_valid_client_id(session_id) or not is_valid_client_id(item_id):
+        return JSONResponse({"error": "invalid_ids"}, status_code=400)
+    if invite_token is not None and not is_valid_invite_token(invite_token):
+        return JSONResponse({"error": "invalid_invite"}, status_code=403)
     d = _chunk_dir(session_id, item_id)
     meta_path = os.path.join(d, "meta.json")
     # Basic validation
@@ -812,7 +943,7 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
             meta = json.load(f)
     except Exception:
         meta = {}
-    total_chunks = int(meta.get("total_chunks") or (data or {}).get("total_chunks") or 0)
+    total_chunks = parse_nonneg_int(meta.get("total_chunks") or (data or {}).get("total_chunks") or 0, MAX_CHUNKS) or 0
     if total_chunks <= 0:
         return JSONResponse({"error": "missing_total"}, status_code=400)
     # Prefer the name captured at init if request did not include it
@@ -1092,8 +1223,10 @@ async def api_login(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
     email = (body or {}).get("email")
     password = (body or {}).get("password")
-    if not email or not password:
+    if not email or not password or not isinstance(email, str) or not isinstance(password, str):
         return JSONResponse({"error": "missing_credentials"}, status_code=400)
+    if len(email) > 320 or len(password) > 1024:
+        return JSONResponse({"error": "invalid_credentials"}, status_code=400)
     try:
         r = requests.post(f"{SETTINGS.normalized_base_url}/auth/login", headers={"Content-Type": "application/json", "Accept": "application/json"}, json={"email": email, "password": password}, timeout=15)
     except Exception as e:
@@ -1149,7 +1282,7 @@ async def api_albums_create(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
-    name = (body or {}).get("name")
+    name = clean_text((body or {}).get("name"), MAX_NAME_LEN)
     if not name:
         return JSONResponse({"error": "missing_name"}, status_code=400)
     try:
@@ -1244,10 +1377,20 @@ async def api_invites_create(request: Request) -> JSONResponse:
     max_uses = (body or {}).get("maxUses", 1)
     invite_password = (body or {}).get("password")
     expires_days = (body or {}).get("expiresDays")
-    # Normalize max_uses
+    if album_id is not None and not (isinstance(album_id, str) and ALBUM_ID_RE.fullmatch(album_id)):
+        return JSONResponse({"error": "invalid_album_id"}, status_code=400)
+    if album_name is not None:
+        album_name = clean_text(album_name, MAX_NAME_LEN)
+        if album_name is None:
+            return JSONResponse({"error": "invalid_album_name"}, status_code=400)
+    if invite_password is not None and not (isinstance(invite_password, str) and len(invite_password) <= MAX_PASSWORD_LEN):
+        return JSONResponse({"error": "invalid_password"}, status_code=400)
+    # Normalize max_uses (-1 = unlimited)
     try:
         max_uses = int(max_uses)
     except Exception:
+        max_uses = 1
+    if max_uses < -1 or max_uses > 1_000_000:
         max_uses = 1
     # Allow blank album for invites (no album association)
     if not album_name and SETTINGS.album_name and not album_id and album_name is not None:
@@ -1263,10 +1406,9 @@ async def api_invites_create(request: Request) -> JSONResponse:
     if expires_days is not None:
         try:
             days = int(expires_days)
-            expires_at = (datetime.utcnow()).replace(microsecond=0).isoformat()
-            # Use timedelta
-            from datetime import timedelta
-            expires_at = (datetime.utcnow() + timedelta(days=days)).replace(microsecond=0).isoformat()
+            if 0 <= days <= 3650:
+                from datetime import timedelta
+                expires_at = (datetime.utcnow() + timedelta(days=days)).replace(microsecond=0).isoformat()
         except Exception:
             expires_at = None
     # Generate token
@@ -1336,7 +1478,7 @@ async def api_invites_list(request: Request) -> JSONResponse:
     if not request.session.get("accessToken"):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     owner_user_id = str(request.session.get("userId") or "")
-    q = (request.query_params.get("q") or "").strip()
+    q = (request.query_params.get("q") or "").strip()[:100]
     sort = (request.query_params.get("sort") or "-created").strip()
     # Map sort tokens to SQL
     sort_sql = "created_at DESC"
@@ -1430,6 +1572,8 @@ async def api_invite_update(token: str, request: Request) -> JSONResponse:
     """Update invite fields: name, disabled, maxUses, expiresAt/expiresDays, password, resetUsage."""
     if not request.session.get("accessToken"):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not is_valid_invite_token(token):
+        return JSONResponse({"error": "invalid_token"}, status_code=400)
     try:
         body = await request.json()
     except Exception:
@@ -1441,7 +1585,7 @@ async def api_invite_update(token: str, request: Request) -> JSONResponse:
     # Name
     if "name" in (body or {}):
         fields.append("name = ?")
-        params.append(str((body or {}).get("name") or "").strip())
+        params.append(str((body or {}).get("name") or "").strip()[:MAX_NAME_LEN])
     # Disabled toggle
     if "disabled" in (body or {}):
         try:
@@ -1456,6 +1600,8 @@ async def api_invite_update(token: str, request: Request) -> JSONResponse:
             mu = int((body or {}).get("maxUses"))
         except Exception:
             mu = 1
+        if mu < -1 or mu > 1_000_000:
+            mu = 1
         fields.append("max_uses = ?")
         params.append(mu)
     # Expiration
@@ -1463,13 +1609,15 @@ async def api_invite_update(token: str, request: Request) -> JSONResponse:
         expires_at = None
         if (body or {}).get("expiresAt"):
             try:
-                # trust provided ISO string
-                expires_at = str((body or {}).get("expiresAt"))
+                # only accept a parseable ISO-8601 string; store the normalized form
+                expires_at = datetime.fromisoformat(str((body or {}).get("expiresAt"))).isoformat()
             except Exception:
                 expires_at = None
         else:
             try:
                 days = int((body or {}).get("expiresDays"))
+                if not (0 <= days <= 3650):
+                    raise ValueError("expiresDays out of range")
                 from datetime import timedelta
                 expires_at = (datetime.utcnow() + timedelta(days=days)).replace(microsecond=0).isoformat()
             except Exception:
@@ -1478,7 +1626,7 @@ async def api_invite_update(token: str, request: Request) -> JSONResponse:
         params.append(expires_at)
     # Password
     if "password" in (body or {}):
-        pw = str((body or {}).get("password") or "").strip()
+        pw = str((body or {}).get("password") or "").strip()[:MAX_PASSWORD_LEN]
         if pw:
             # Reuse hasher from above
             def _hash_pw(pw: str) -> str:
@@ -1525,10 +1673,12 @@ async def api_invites_bulk(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
-    tokens = list((body or {}).get("tokens") or [])
+    tokens = [t for t in list((body or {}).get("tokens") or []) if is_valid_invite_token(t)]
     action = str((body or {}).get("action") or "disable").lower().strip()
-    if not tokens:
+    if not tokens or len(tokens) > MAX_TOKENS_PER_REQUEST:
         return JSONResponse({"error": "missing_tokens"}, status_code=400)
+    if action not in ("disable", "enable"):
+        return JSONResponse({"error": "invalid_action"}, status_code=400)
     val = 1 if action == "disable" else 0
     owner_user_id = str(request.session.get("userId") or "")
     try:
@@ -1560,18 +1710,18 @@ async def api_invites_delete(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
-    tokens = list((body or {}).get("tokens") or [])
-    if not tokens:
+    tokens = [t for t in list((body or {}).get("tokens") or []) if is_valid_invite_token(t)]
+    if not tokens or len(tokens) > MAX_TOKENS_PER_REQUEST:
         return JSONResponse({"error": "missing_tokens"}, status_code=400)
     owner_user_id = str(request.session.get("userId") or "")
     try:
         conn = sqlite3.connect(SETTINGS.state_db)
         cur = conn.cursor()
         placeholders = ",".join(["?"] * len(tokens))
-        # Delete upload events first to avoid orphan rows
+        # Delete upload events first to avoid orphan rows (only for invites this user owns)
         cur.execute(
-            f"DELETE FROM upload_events WHERE token IN ({placeholders})",
-            (*tokens,)
+            f"DELETE FROM upload_events WHERE token IN (SELECT token FROM invites WHERE owner_user_id = ? AND token IN ({placeholders}))",
+            (owner_user_id, *tokens)
         )
         # Delete invites scoped to owner
         cur.execute(
@@ -1591,6 +1741,8 @@ async def api_invite_uploads(token: str, request: Request) -> JSONResponse:
     """Return upload events for a given token (owner-only)."""
     if not request.session.get("accessToken"):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not is_valid_invite_token(token):
+        return JSONResponse({"error": "not_found"}, status_code=404)
     owner_user_id = str(request.session.get("userId") or "")
     try:
         conn = sqlite3.connect(SETTINGS.state_db)
@@ -1626,10 +1778,14 @@ async def invite_page(token: str, request: Request) -> HTMLResponse:
     # If public invites disabled and no user session, require login
     #if  not request.session.get("accessToken"):
     #    return RedirectResponse(url="/login")
+    if not is_valid_invite_token(token):
+        return HTMLResponse("Not found", status_code=404)
     return FileResponse(os.path.join(FRONTEND_DIR, "invite.html"))
 
 @app.get("/api/invite/{token}")
 async def api_invite_info(token: str, request: Request) -> JSONResponse:
+    if not is_valid_invite_token(token):
+        return JSONResponse({"error": "not_found"}, status_code=404)
     try:
         conn = sqlite3.connect(SETTINGS.state_db)
         cur = conn.cursor()
@@ -1709,11 +1865,15 @@ async def api_invite_info(token: str, request: Request) -> JSONResponse:
 @app.post("/api/invite/{token}/auth")
 async def api_invite_auth(token: str, request: Request) -> JSONResponse:
     """Validate a password for an invite token, and mark this session authorized if valid."""
+    if not is_valid_invite_token(token):
+        return JSONResponse({"error": "not_found"}, status_code=404)
     try:
         body = await request.json()
     except Exception:
         body = None
     provided = (body or {}).get("password") if isinstance(body, dict) else None
+    if provided is not None and not (isinstance(provided, str) and len(provided) <= MAX_PASSWORD_LEN):
+        return JSONResponse({"error": "invalid_password"}, status_code=403)
     try:
         conn = sqlite3.connect(SETTINGS.state_db)
         cur = conn.cursor()
@@ -1760,6 +1920,8 @@ async def api_qr(request: Request):
     text = request.query_params.get("text")
     if not text:
         return JSONResponse({"error": "missing_text"}, status_code=400)
+    if len(text) > 2048:
+        return JSONResponse({"error": "text_too_long"}, status_code=400)
     if qrcode is None:
         logger.warning("qrcode library not installed; cannot generate QR")
         return JSONResponse({"error": "qr_not_available"}, status_code=501)

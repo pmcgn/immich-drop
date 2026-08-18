@@ -87,6 +87,15 @@ function human(bytes){
   return (bytes/Math.pow(k,i)).toFixed(1)+' '+sizes[i];
 }
 
+function escapeHtml(v){
+  return String(v ?? '')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'",'&#39;');
+}
+
 function addItem(file){
   const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Math.random().toString(36).slice(2));
   const it = { id, file, name: file.name, size: file.size, status: 'queued', progress: 0 };
@@ -100,9 +109,9 @@ function render(){
     <div class="rounded-2xl border bg-white dark:bg-gray-800 dark:border-gray-700 p-4 shadow-sm transition-colors">
       <div class="flex items-center justify-between">
         <div class="min-w-0">
-          <div class="truncate font-medium">${it.name} <span class="text-xs text-gray-500 dark:text-gray-400">(${human(it.size)})</span></div>
+          <div class="truncate font-medium">${escapeHtml(it.name)} <span class="text-xs text-gray-500 dark:text-gray-400">(${human(it.size)})</span></div>
           <div class="mt-1 text-xs text-gray-600 dark:text-gray-400">
-            ${it.message ? `<span>${it.message}</span>` : ''}
+            ${it.message ? `<span>${escapeHtml(it.message)}</span>` : ''}
           </div>
         </div>
         <div class="flex items-center gap-2 text-sm">
