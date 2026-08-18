@@ -16,7 +16,7 @@ import json
 import hashlib
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import requests
@@ -248,6 +248,12 @@ def read_exif_datetimes(file_bytes: bytes):
         pass
     return created, modified
 
+def immich_iso(dt: datetime) -> str:
+    """Immich v3 requires a timezone-qualified ISO 8601 string; assume UTC when naive."""
+    if dt.tzinfo is None:
+        return f"{dt.isoformat()}Z"
+    return dt.isoformat()
+
 def immich_headers(request: Optional[Request] = None) -> dict:
     """Headers for Immich API calls using either session access token or API key."""
     headers = {"Accept": "application/json"}
@@ -475,10 +481,10 @@ async def api_upload(
     checksum = sha1_hex(raw)
 
     exif_created, exif_modified = read_exif_datetimes(raw)
-    created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000) if last_modified else datetime.utcnow())
+    created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000, tz=timezone.utc) if last_modified else datetime.now(timezone.utc))
     modified_at = exif_modified or created_at
-    created_iso = created_at.isoformat()
-    modified_iso = modified_at.isoformat()
+    created_iso = immich_iso(created_at)
+    modified_iso = immich_iso(modified_at)
 
     device_asset_id = f"{file.filename}-{last_modified or 0}-{size}"
 
@@ -855,10 +861,10 @@ async def api_upload_chunk_complete(request: Request) -> JSONResponse:
     file_size = len(raw)
     checksum = sha1_hex(raw)
     exif_created, exif_modified = read_exif_datetimes(raw)
-    created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000) if last_modified else datetime.utcnow())
+    created_at = exif_created or (datetime.fromtimestamp(last_modified / 1000, tz=timezone.utc) if last_modified else datetime.now(timezone.utc))
     modified_at = exif_modified or created_at
-    created_iso = created_at.isoformat()
-    modified_iso = modified_at.isoformat()
+    created_iso = immich_iso(created_at)
+    modified_iso = immich_iso(modified_at)
     device_asset_id = f"{file_like_name}-{last_modified or 0}-{file_size}"
 
     # Local duplicate checks
