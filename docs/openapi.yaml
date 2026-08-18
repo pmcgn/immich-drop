@@ -1,0 +1,1185 @@
+openapi: 3.0.3
+info:
+  title: Immich Drop Uploader – Frontend/Backend API
+  description: |
+    HTTP contract between the static frontend (`frontend/`) and the backend
+    (currently `app/app.py`, to be rewritten in Go). The WebSocket progress
+    channel at `/ws` is documented separately in `websocket.md`.
+
+    Conventions observed by the current implementation:
+    - Errors are returned as `{"error": "<snake_case_code_or_message>"}` with an
+      appropriate HTTP status. There is no envelope for successes.
+    - Authenticated ("owner") endpoints rely on the signed session cookie set by
+      `POST /api/login`; they return 401 `{"error":"unauthorized"}` without it.
+    - The backend acts as a proxy to the Immich server; 502 responses generally
+      mean the Immich call itself failed or returned an unexpected status.
+  version: 1.0.0 (documents the Python implementation as of 2026-08)
+
+servers:
+  - url: /
+
+tags:
+  - name: pages
+    description: HTML page routes (serve static frontend files, may redirect)
+  - name: status
+    description: Connectivity and public configuration
+  - name: upload
+    description: File upload (whole and chunked) and album cache control
+  - name: auth
+    description: Login/logout against the Immich server (cookie session)
+  - name: albums
+    description: Album listing/creation, proxied to Immich
+  - name: invites
+    description: Invite link management (owner) and public invite info/auth
+  - name: misc
+
+components:
+  parameters:
+    inviteToken:
+      name: token
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9a-f]{32}$"
+      description: Invite token (uuid4 hex, 32 lowercase hex chars)
+
+  securitySchemes:
+    cookieSession:
+      type: apiKey
+      in: cookie
+      name: session
+      description: >
+        Starlette SessionMiddleware signed cookie (SameSite=lax). Contains the
+        Immich accessToken and user identity after POST /api/login, plus the
+        `inviteAuth` map of password-unlocked invite tokens.
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code or upstream message
+      required: [error]
+
+    Ok:
+      type: object
+      properties:
+        ok:
+          type: boolean
+      required: [ok]
+
+    PingResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          description: >
+            True when IMMICH_API_KEY is configured and one of the Immich probe
+            endpoints (/server-info, /server/version, /users/me) answered 2xx/3xx.
+        base_url:
+          type: string
+          description: Normalized Immich base URL (no trailing slash)
+        album_name:
+          type: string
+          nullable: true
+          description: Configured default album name, or null
+      required: [ok, base_url, album_name]
+
+    ConfigResponse:
+      type: object
+      properties:
+        public_upload_page_enabled:
+          type: boolean
+        chunked_uploads_enabled:
+          type: boolean
+        chunk_size_mb:
+          type: integer
+          description: Chunk size the frontend should use for chunked uploads
+      required: [public_upload_page_enabled, chunked_uploads_enabled, chunk_size_mb]
+
+    UploadResult:
+      type: object
+      description: >
+        Outcome of an upload. For duplicates detected via the local cache,
+        `id` is null and `status` is "duplicate". For server-detected
+        duplicates, `id` is the existing Immich asset id. For successful
+        uploads, `status` is the Immich status (usually "created"), possibly
+        with " (added to album '<name>')" appended.
+      properties:
+        id:
+          type: string
+          nullable: true
+          description: Immich asset id (null for local-cache duplicates)
+        status:
+          type: string
+          example: created (added to album 'Drop')
+      required: [status]
+
+    ChunkInitRequest:
+      type: object
+      properties:
+        item_id:
+          type: string
+          description: Client-generated id of the queue item (also used in WS events)
+        session_id:
+          type: string
+          description: Client session id (same as sent over the WebSocket)
+        name:
+          type: string
+          description: Original filename
+        size:
+          type: integer
+        last_modified:
+          type: integer
+          nullable: true
+          description: File mtime in epoch milliseconds
+        invite_token:
+          type: string
+          nullable: true
+        content_type:
+          type: string
+          default: application/octet-stream
+      required: [item_id, session_id]
+
+    ChunkCompleteRequest:
+      type: object
+      properties:
+        item_id:
+          type: string
+        session_id:
+          type: string
+        name:
+          type: string
+          description: Filename; falls back to the name given at init, then "upload.bin"
+        total_chunks:
+          type: integer
+          description: Fallback if not recorded during chunk uploads
+        last_modified:
+          type: integer
+          nullable: true
+        invite_token:
+          type: string
+          nullable: true
+        fingerprint:
+          type: string
+          nullable: true
+        content_type:
+          type: string
+          default: application/octet-stream
+      required: [item_id, session_id]
+
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+      required: [email, password]
+
+    LoginResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        userEmail:
+          type: string
+          nullable: true
+        userId:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        isAdmin:
+          type: boolean
+      required: [ok]
+
+    Album:
+      type: object
+      description: Immich album object, passed through verbatim from the Immich API.
+      properties:
+        id:
+          type: string
+        albumName:
+          type: string
+      additionalProperties: true
+
+    CreateAlbumRequest:
+      type: object
+      properties:
+        name:
+          type: string
+      required: [name]
+
+    CreateInviteRequest:
+      type: object
+      properties:
+        albumId:
+          type: string
+          nullable: true
+          description: Target album id; takes precedence over albumName
+        albumName:
+          type: string
+          nullable: true
+          description: >
+            Target album name; resolved (or created) to an id at invite-creation
+            time. Explicit null/empty means "no album". When the field is absent
+            and a default album is configured in the environment, the default is
+            used.
+        maxUses:
+          type: integer
+          default: 1
+          description: 1 = one-time (claimable by a single browser session), >1 = usage-limited, negative = unlimited
+        password:
+          type: string
+          nullable: true
+          description: Optional password protecting the invite (PBKDF2-hashed at rest)
+        expiresDays:
+          type: integer
+          nullable: true
+          description: Expiry in days from now (absent = never expires)
+
+    CreateInviteResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        token:
+          type: string
+          description: 32-char lowercase hex token
+        url:
+          type: string
+          example: /invite/0123abcd...
+        absoluteUrl:
+          type: string
+          description: Absolute link, based on PUBLIC_BASE_URL or the request base URL
+        albumId:
+          type: string
+          nullable: true
+        albumName:
+          type: string
+          nullable: true
+        maxUses:
+          type: integer
+        expiresAt:
+          type: string
+          nullable: true
+          description: Naive-UTC ISO 8601 timestamp (no timezone suffix)
+        name:
+          type: string
+          description: Auto-generated friendly name "{album|NoAlbum}-YYYYMMDD-HHMM"
+      required: [ok, token, url, absoluteUrl]
+
+    InviteListItem:
+      type: object
+      properties:
+        token:
+          type: string
+        name:
+          type: string
+          nullable: true
+        albumId:
+          type: string
+          nullable: true
+        albumName:
+          type: string
+          nullable: true
+        maxUses:
+          type: integer
+          nullable: true
+        used:
+          type: integer
+        remaining:
+          type: integer
+          nullable: true
+          description: maxUses - used when maxUses >= 0, else null (unlimited)
+        expiresAt:
+          type: string
+          nullable: true
+        active:
+          type: boolean
+        inactiveReason:
+          type: string
+          nullable: true
+          enum: [claimed, exhausted, expired, disabled, null]
+        createdAt:
+          type: string
+      required: [token, used, active]
+
+    InviteInfo:
+      type: object
+      description: Public view of a single invite (no auth required).
+      properties:
+        token:
+          type: string
+        albumId:
+          type: string
+          nullable: true
+        albumName:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        maxUses:
+          type: integer
+          nullable: true
+        used:
+          type: integer
+        remaining:
+          type: integer
+          nullable: true
+        expiresAt:
+          type: string
+          nullable: true
+        oneTime:
+          type: boolean
+        claimed:
+          type: boolean
+        claimedAt:
+          type: string
+          nullable: true
+        expired:
+          type: boolean
+        active:
+          type: boolean
+        inactiveReason:
+          type: string
+          nullable: true
+          enum: [claimed, exhausted, expired, disabled, inactive, null]
+        passwordRequired:
+          type: boolean
+        authorized:
+          type: boolean
+          description: True when this browser session already passed the invite password check
+      required: [token, used, oneTime, claimed, expired, active, passwordRequired, authorized]
+
+    UpdateInviteRequest:
+      type: object
+      description: Partial update; only provided keys are applied.
+      properties:
+        name:
+          type: string
+        disabled:
+          type: boolean
+        maxUses:
+          type: integer
+        expiresAt:
+          type: string
+          description: ISO timestamp, trusted as-is; takes precedence over expiresDays
+        expiresDays:
+          type: integer
+        password:
+          type: string
+          description: Non-empty sets a new password; empty string removes the password
+        resetUsage:
+          type: boolean
+          description: Reset used_count/claimed state to make the invite usable again
+
+    BulkInviteRequest:
+      type: object
+      properties:
+        tokens:
+          type: array
+          items:
+            type: string
+        action:
+          type: string
+          enum: [disable, enable]
+          default: disable
+      required: [tokens]
+
+    DeleteInvitesRequest:
+      type: object
+      properties:
+        tokens:
+          type: array
+          items:
+            type: string
+      required: [tokens]
+
+    UploadEvent:
+      type: object
+      properties:
+        uploadedAt:
+          type: string
+        ip:
+          type: string
+          nullable: true
+        userAgent:
+          type: string
+          nullable: true
+        fingerprint:
+          type: string
+          nullable: true
+        filename:
+          type: string
+        size:
+          type: integer
+        checksum:
+          type: string
+          description: SHA-1 hex of the uploaded file
+        assetId:
+          type: string
+          nullable: true
+
+paths:
+  /:
+    get:
+      tags: [pages]
+      summary: Upload page (SPA)
+      responses:
+        "200":
+          description: frontend/index.html
+          content:
+            text/html: {}
+        "307":
+          description: Redirect to /login when PUBLIC_UPLOAD_PAGE_ENABLED is false
+
+  /login:
+    get:
+      tags: [pages]
+      summary: Login page
+      responses:
+        "200":
+          description: frontend/login.html
+          content:
+            text/html: {}
+
+  /menu:
+    get:
+      tags: [pages]
+      summary: Invite-management page (requires login)
+      responses:
+        "200":
+          description: frontend/menu.html
+          content:
+            text/html: {}
+        "307":
+          description: Redirect to /login when no session accessToken
+
+  /logout:
+    get:
+      tags: [pages]
+      summary: Clear session and redirect to /login
+      responses:
+        "307":
+          description: Redirect to /login (session cleared)
+
+  /invite/{token}:
+    get:
+      tags: [pages]
+      summary: Invite landing page (upload UI scoped to the invite)
+      description: Always serves the page; the page itself fetches /api/invite/{token} to validate.
+      parameters:
+        - $ref: "#/components/parameters/inviteToken"
+      responses:
+        "200":
+          description: frontend/invite.html
+          content:
+            text/html: {}
+
+  /favicon.ico:
+    get:
+      tags: [pages]
+      summary: Favicon
+      responses:
+        "200":
+          description: frontend/favicon.png
+          content:
+            image/png: {}
+        "204":
+          description: No favicon file present
+
+  /api/ping:
+    post:
+      tags: [status]
+      summary: Immich reachability check (used for the "Connected" banner)
+      responses:
+        "200":
+          description: Always 200; `ok` conveys the result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PingResponse"
+
+  /api/config:
+    get:
+      tags: [status]
+      summary: Public frontend configuration flags
+      responses:
+        "200":
+          description: Config flags
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigResponse"
+
+  /api/upload:
+    post:
+      tags: [upload]
+      summary: Upload a whole file
+      description: |
+        Reads the file, dedupes (local SQLite cache by SHA-1 checksum and
+        deviceAssetId, then Immich bulk-upload-check), validates the invite
+        token if given, forwards to Immich `POST /assets`, optionally adds the
+        asset to an album, and streams progress over the WebSocket using
+        `session_id`/`item_id`. Duplicates are reported as HTTP 200 with
+        status "duplicate".
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                item_id:
+                  type: string
+                session_id:
+                  type: string
+                last_modified:
+                  type: integer
+                  description: File mtime, epoch milliseconds
+                invite_token:
+                  type: string
+                fingerprint:
+                  type: string
+                  description: Client-generated browser fingerprint (audit log only)
+              required: [file, item_id, session_id]
+      responses:
+        "200":
+          description: Uploaded or duplicate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResult"
+        "400":
+          description: Immich rejected the upload; `error` carries the upstream message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: >
+            Invite rejected. `error` is one of: invalid_invite, invite_disabled,
+            invite_password_required, invite_expired, invite_claimed,
+            invite_exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Unexpected failure (error is exception text or invite_claim_failed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/upload/chunk/init:
+    post:
+      tags: [upload]
+      summary: Begin a chunked upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChunkInitRequest"
+      responses:
+        "200":
+          description: Chunk directory created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+        "400":
+          description: invalid_json or missing_ids
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: init_failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/upload/chunk:
+    post:
+      tags: [upload]
+      summary: Upload one chunk
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                item_id:
+                  type: string
+                session_id:
+                  type: string
+                chunk_index:
+                  type: integer
+                  description: 0-based
+                total_chunks:
+                  type: integer
+                invite_token:
+                  type: string
+                chunk:
+                  type: string
+                  format: binary
+              required: [item_id, session_id, chunk_index, total_chunks, chunk]
+      responses:
+        "200":
+          description: Chunk stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+        "500":
+          description: chunk_write_failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/upload/chunk/complete:
+    post:
+      tags: [upload]
+      summary: Assemble chunks and run the normal upload pipeline
+      description: >
+        Concatenates all parts (in memory), deletes the temp files, then behaves
+        exactly like POST /api/upload (dedupe, invite gating, Immich forward,
+        album assignment, WS progress, audit log).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChunkCompleteRequest"
+      responses:
+        "200":
+          description: Uploaded or duplicate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResult"
+        "400":
+          description: >
+            invalid_json, missing_ids, missing_total, or missing_part (includes
+            `index` of the first missing part). Also Immich upload rejection, as
+            in POST /api/upload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Invite rejected (same codes as POST /api/upload)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: assemble_failed, invite_claim_failed, or exception text
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/album/reset:
+    post:
+      tags: [upload]
+      summary: Clear the cached default-album id
+      responses:
+        "200":
+          description: Cache cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+
+  /api/login:
+    post:
+      tags: [auth]
+      summary: Login via Immich credentials; sets the session cookie
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Logged in; session cookie set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          description: invalid_json or missing_credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: unauthorized (Immich rejected the credentials)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: login_failed (Immich unreachable) or invalid_response (no accessToken)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/logout:
+    post:
+      tags: [auth]
+      summary: Clear the session
+      responses:
+        "200":
+          description: Session cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+
+  /api/albums:
+    get:
+      tags: [albums]
+      summary: List Immich albums (proxied)
+      description: Uses the session bearer token when present, else the server API key.
+      security:
+        - cookieSession: []
+        - {}
+      responses:
+        "200":
+          description: Verbatim Immich album list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Album"
+        "403":
+          description: forbidden (Immich returned 401/403)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: request_failed or unexpected_status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      tags: [albums]
+      summary: Create an Immich album (proxied)
+      security:
+        - cookieSession: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAlbumRequest"
+      responses:
+        "201":
+          description: Verbatim Immich album object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Album"
+        "400":
+          description: invalid_json or missing_name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: request_failed or unexpected_status (includes `status` and `body`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/invites:
+    post:
+      tags: [invites]
+      summary: Create an invite link
+      security:
+        - cookieSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInviteRequest"
+      responses:
+        "200":
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateInviteResponse"
+        "400":
+          description: invalid_json
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: unauthorized (no session)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      tags: [invites]
+      summary: List the current user's invites
+      security:
+        - cookieSession: []
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Substring filter on name, album name, or token
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [created, +created, -created, expires, +expires, -expires, name, +name, -name]
+            default: "-created"
+      responses:
+        "200":
+          description: Invite list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/InviteListItem"
+                required: [items]
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/invite/{token}:
+    get:
+      tags: [invites]
+      summary: Public invite info (status, password requirement, remaining uses)
+      parameters:
+        - $ref: "#/components/parameters/inviteToken"
+      responses:
+        "200":
+          description: Invite state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteInfo"
+        "404":
+          description: not_found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    patch:
+      tags: [invites]
+      summary: Update an invite (owner only)
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/inviteToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateInviteRequest"
+      responses:
+        "200":
+          description: Updated; `updated` is the number of affected rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  updated:
+                    type: integer
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 'Nothing updated (unknown token, not the owner, or empty body): {"ok": false, "updated": 0}'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  updated:
+                    type: integer
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/invite/{token}/auth:
+    post:
+      tags: [invites]
+      summary: Unlock a password-protected invite for this browser session
+      description: >
+        Verifies the password against the stored PBKDF2 hash and records the
+        authorization in the session cookie (`inviteAuth[token] = true`). For
+        invites without a password, always succeeds and marks authorized.
+      parameters:
+        - $ref: "#/components/parameters/inviteToken"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Authorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  authorized:
+                    type: boolean
+        "403":
+          description: invalid_password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: not_found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/invite/{token}/uploads:
+    get:
+      tags: [invites]
+      summary: Upload audit log for an invite (owner only, latest 500)
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/inviteToken"
+      responses:
+        "200":
+          description: Upload events, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UploadEvent"
+                required: [items]
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: forbidden (token not owned by the current user)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/invites/bulk:
+    post:
+      tags: [invites]
+      summary: Bulk enable/disable invites (owner only)
+      security:
+        - cookieSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkInviteRequest"
+      responses:
+        "200":
+          description: Done; `updated` = affected rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  updated:
+                    type: integer
+        "400":
+          description: missing_tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/invites/delete:
+    post:
+      tags: [invites]
+      summary: Hard-delete invites and their upload logs (owner only)
+      security:
+        - cookieSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteInvitesRequest"
+      responses:
+        "200":
+          description: Done; `deleted` = total affected rows (events + invites)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  deleted:
+                    type: integer
+        "400":
+          description: missing_tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: db_error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/qr:
+    get:
+      tags: [misc]
+      summary: Render a QR code PNG for arbitrary text (used for invite links)
+      parameters:
+        - name: text
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: PNG image
+          content:
+            image/png: {}
+        "400":
+          description: missing_text
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: qr_not_available (qrcode library not installed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+# Note: WebSocket endpoint GET /ws (upgrade) is documented in websocket.md.
+# Static assets are served under /static/** from the frontend/ directory.
