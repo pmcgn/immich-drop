@@ -18,11 +18,39 @@ The frontend directory is auto-detected (`./frontend` or `../frontend`) and can 
 with `FRONTEND_DIR`. All other environment variables match the Python version
 (`IMMICH_BASE_URL`, `IMMICH_API_KEY`, `IMMICH_ALBUM_NAME`, `PUBLIC_UPLOAD_PAGE_ENABLED`,
 `PUBLIC_BASE_URL`, `STATE_DB`, `SESSION_SECRET`, `LOG_LEVEL`, `CHUNKED_UPLOADS_ENABLED`,
-`CHUNK_SIZE_MB`, `HOST`, `PORT`). One addition: `CHUNK_DIR` (default `/data/chunks`, which
-the Python version hardcoded). `CHUNK_DIR` is the on-disk upload cache — chunk parts and
-upload spool files live there, file content is never buffered in memory — so mount it as a
-volume (like `/data` for `STATE_DB`) if you want in-flight chunks to survive a container or
-pod recreation.
+`CHUNK_SIZE_MB`, `HOST`, `PORT`). Additions: `CHUNK_DIR` (default `/data/chunks`, which
+the Python version hardcoded) and `ADMIN_PORT` (optional, see below). `CHUNK_DIR` is the on-disk
+upload cache — chunk parts and upload spool files live there, file content is never
+buffered in memory — so mount it as a volume (like `/data` for `STATE_DB`) if you want
+in-flight chunks to survive a container or pod recreation.
+
+### Split-port mode (`ADMIN_PORT`)
+
+When `ADMIN_PORT` is set, the server runs two listeners on the same host address:
+
+- **`PORT` (public upload port):** upload pages and endpoints — `/`, `/invite/{token}`,
+  `/ws`, `/api/upload*`, `/api/album/reset`, `GET /api/invite/{token}`,
+  `POST /api/invite/{token}/auth`.
+- **`ADMIN_PORT` (admin port):** login and invite management — `/login`, `/menu`,
+  `/logout`, `/api/login`, `/api/logout`, `/api/albums`, `/api/invites*`,
+  `PATCH /api/invite/{token}`, `GET /api/invite/{token}/uploads`, `/api/qr`.
+
+Static assets (`/static/`, `/favicon.ico`) and the probes used by every page
+(`POST /api/ping`, `GET /api/config`) are served on both ports. This lets you expose only
+the upload port publicly (e.g. through a tunnel/reverse proxy) while keeping the admin UI
+reachable only internally. Notes:
+
+- Set `PUBLIC_BASE_URL` to the upload port's public address; otherwise invite links
+  created via the admin port point at the admin address (the server logs a warning).
+- Both listeners share one process (session secret, SQLite store, album cache), so
+  behavior is identical to single-port mode apart from routing. Admin login sessions
+  carry over to the upload port only when both are reached under the same hostname
+  (cookies ignore ports); otherwise public-page uploads fall back to the API key.
+- With `PUBLIC_UPLOAD_PAGE_ENABLED=false`, `/` on the upload port returns 404 instead
+  of redirecting to `/login` (which only exists on the admin port).
+
+When `ADMIN_PORT` is unset (the default), all endpoints are served on `PORT` exactly as
+before.
 
 The build is pure Go (no cgo): `modernc.org/sqlite` is used for SQLite, so
 cross-compilation for Docker images is a plain `GOOS=linux go build`.

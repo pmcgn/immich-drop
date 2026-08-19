@@ -164,6 +164,7 @@ Loaded once at import time (`app/config.py`, `load_settings()`), from environmen
 | `CHUNKED_UPLOADS_ENABLED` | `false` | Advertised to the frontend via `/api/config` |
 | `CHUNK_SIZE_MB` | `95` | Chunk size advertised to the frontend |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Listen address (read in `main.py` only) |
+| `ADMIN_PORT` | unset | **Optional, Go backend only.** When set, admin endpoints (login/menu/invite management) move to this port and `PORT` serves only the public upload endpoints; unset = everything on `PORT`. See [`go/README.md`](../go/README.md) for the exact route split |
 
 Boolean parsing accepts `1/true/yes/on` (case-insensitive).
 

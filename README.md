@@ -211,6 +211,13 @@ The backend contains docstrings so you can generate docs later if desired.
 HOST=0.0.0.0
 PORT=8080
 
+# Optional (Go backend only): split-port mode. When set, admin endpoints
+# (login, menu, invite management) are served on this port and PORT serves only
+# the public upload endpoints — useful to expose only the upload port publicly.
+# Leave unset (default) to serve everything on PORT.
+# Set PUBLIC_BASE_URL when enabling this, so invite links point at the upload port.
+#ADMIN_PORT=8081
+
 # Immich connection (include /api)
 IMMICH_BASE_URL=http://REPLACE_ME:2283/api
 IMMICH_API_KEY=ADD-YOUR-API-KEY   # needs: asset.upload; for albums also: album.create, album.read, albumAsset.create

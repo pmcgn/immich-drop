@@ -13,9 +13,15 @@ func (s *Server) serveFrontendFile(w http.ResponseWriter, r *http.Request, name 
 }
 
 // handleIndex serves the SPA, or redirects to login when the public upload
-// page is disabled.
+// page is disabled. In split-port mode /login lives on the admin port, so the
+// redirect would just 404 — return 404 directly instead of leaking that an
+// admin UI exists elsewhere.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.PublicUploadPageEnabled {
+		if s.cfg.SplitPorts() {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
 		http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
 		return
 	}

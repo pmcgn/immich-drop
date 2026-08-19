@@ -39,6 +39,16 @@ type Settings struct {
 
 	Host string
 	Port string
+
+	// AdminPort enables split-port mode when non-empty: the upload endpoints
+	// stay on Port while the login/menu/invite-management endpoints move to
+	// this port (same Host). Empty = everything on Port (default).
+	AdminPort string
+}
+
+// SplitPorts reports whether admin endpoints are served on a separate port.
+func (s *Settings) SplitPorts() bool {
+	return s.AdminPort != ""
 }
 
 // NormalizedBaseURL returns the Immich base URL without a trailing slash.
@@ -126,5 +136,6 @@ func Load() *Settings {
 		FrontendDir:             envOr("FRONTEND_DIR", findFrontendDir()),
 		Host:                    envOr("HOST", "0.0.0.0"),
 		Port:                    envOr("PORT", "8080"),
+		AdminPort:               os.Getenv("ADMIN_PORT"),
 	}
 }

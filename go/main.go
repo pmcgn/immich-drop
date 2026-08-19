@@ -51,10 +51,35 @@ func main() {
 	srv := server.New(cfg, st)
 	srv.StartChunkSweeper()
 	addr := net.JoinHostPort(cfg.Host, cfg.Port)
-	slog.Info("immich-drop (Go) listening", "addr", addr,
-		"immich", cfg.NormalizedBaseURL(), "frontend", cfg.FrontendDir)
-	if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
-		slog.Error("server exited", "err", err)
-		os.Exit(1)
+
+	if !cfg.SplitPorts() {
+		slog.Info("immich-drop (Go) listening", "addr", addr,
+			"immich", cfg.NormalizedBaseURL(), "frontend", cfg.FrontendDir)
+		if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
+			slog.Error("server exited", "err", err)
+			os.Exit(1)
+		}
+		return
 	}
+
+	// Split-port mode (ADMIN_PORT set): upload endpoints on PORT, admin
+	// endpoints on ADMIN_PORT. Both listeners share the same Server (session
+	// secret, SQLite store, album cache), so behavior is unchanged apart from
+	// routing. Invite links built by the admin port fall back to the request
+	// host when PUBLIC_BASE_URL is unset — that would point guests at the
+	// admin port, hence the warning.
+	adminAddr := net.JoinHostPort(cfg.Host, cfg.AdminPort)
+	if cfg.PublicBaseURL == "" {
+		slog.Warn("ADMIN_PORT is set but PUBLIC_BASE_URL is not; " +
+			"invite links created on the admin port will point at the admin address")
+	}
+	slog.Info("immich-drop (Go) listening (split ports)",
+		"upload_addr", addr, "admin_addr", adminAddr,
+		"immich", cfg.NormalizedBaseURL(), "frontend", cfg.FrontendDir)
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- http.ListenAndServe(addr, srv.UploadHandler()) }()
+	go func() { errCh <- http.ListenAndServe(adminAddr, srv.AdminHandler()) }()
+	slog.Error("server exited", "err", <-errCh)
+	os.Exit(1)
 }

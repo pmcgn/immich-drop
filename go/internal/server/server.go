@@ -65,30 +65,38 @@ func (s *Server) acquireUploadSlot() func() {
 	return func() { <-s.uploadSem }
 }
 
-// Handler returns the fully-routed HTTP handler.
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-
-	// Pages & static
-	mux.HandleFunc("GET /{$}", s.handleIndex)
-	mux.HandleFunc("GET /login", s.handleLoginPage)
-	mux.HandleFunc("GET /menu", s.handleMenuPage)
-	mux.HandleFunc("GET /logout", s.handleLogoutRedirect)
+// registerShared adds the routes every page depends on: static assets plus the
+// connectivity/config probes called by header.js on all pages.
+func (s *Server) registerShared(mux *http.ServeMux) {
 	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
-	mux.HandleFunc("GET /invite/{token}", s.handleInvitePage)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(s.cfg.FrontendDir))))
-
-	// WebSocket
-	mux.HandleFunc("GET /ws", s.handleWS)
-
-	// API
 	mux.HandleFunc("POST /api/ping", s.handlePing)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
+}
+
+// registerUpload adds the routes needed by the upload pages (index.html and
+// invite.html): the pages themselves, the progress WebSocket, the upload
+// endpoints, and the public (no-login) invite info/password endpoints.
+func (s *Server) registerUpload(mux *http.ServeMux) {
+	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /invite/{token}", s.handleInvitePage)
+	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("POST /api/upload", s.handleUpload)
 	mux.HandleFunc("POST /api/upload/chunk/init", s.handleChunkInit)
 	mux.HandleFunc("POST /api/upload/chunk", s.handleChunk)
 	mux.HandleFunc("POST /api/upload/chunk/complete", s.handleChunkComplete)
+	// Called by the upload page's "Clear" buttons (unauthenticated by design).
 	mux.HandleFunc("POST /api/album/reset", s.handleAlbumReset)
+	mux.HandleFunc("GET /api/invite/{token}", s.handleInviteInfo)
+	mux.HandleFunc("POST /api/invite/{token}/auth", s.handleInviteAuth)
+}
+
+// registerAdmin adds the routes needed by the login and invite-management
+// pages (login.html and menu.html).
+func (s *Server) registerAdmin(mux *http.ServeMux) {
+	mux.HandleFunc("GET /login", s.handleLoginPage)
+	mux.HandleFunc("GET /menu", s.handleMenuPage)
+	mux.HandleFunc("GET /logout", s.handleLogoutRedirect)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/albums", s.handleAlbumsList)
@@ -97,12 +105,36 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/invites", s.handleInvitesList)
 	mux.HandleFunc("POST /api/invites/bulk", s.handleInvitesBulk)
 	mux.HandleFunc("POST /api/invites/delete", s.handleInvitesDelete)
-	mux.HandleFunc("GET /api/invite/{token}", s.handleInviteInfo)
 	mux.HandleFunc("PATCH /api/invite/{token}", s.handleInviteUpdate)
 	mux.HandleFunc("GET /api/invite/{token}/uploads", s.handleInviteUploads)
-	mux.HandleFunc("POST /api/invite/{token}/auth", s.handleInviteAuth)
 	mux.HandleFunc("GET /api/qr", s.handleQR)
+}
 
+// Handler returns the fully-routed HTTP handler serving every endpoint
+// (single-port mode, the default).
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerShared(mux)
+	s.registerUpload(mux)
+	s.registerAdmin(mux)
+	return corsMiddleware(mux)
+}
+
+// UploadHandler returns the handler for the public upload port in split-port
+// mode (ADMIN_PORT set): upload endpoints plus shared assets/probes.
+func (s *Server) UploadHandler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerShared(mux)
+	s.registerUpload(mux)
+	return corsMiddleware(mux)
+}
+
+// AdminHandler returns the handler for the admin port in split-port mode:
+// login and invite-management endpoints plus shared assets/probes.
+func (s *Server) AdminHandler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerShared(mux)
+	s.registerAdmin(mux)
 	return corsMiddleware(mux)
 }
 
