@@ -15,6 +15,7 @@ import (
 	"immich-drop/internal/exifdate"
 	"immich-drop/internal/immich"
 	"immich-drop/internal/session"
+	"immich-drop/internal/store"
 	"immich-drop/internal/validate"
 )
 
@@ -58,7 +59,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inviteToken := ""
-	if vals, ok := r.MultipartForm.Value["invite_token"]; ok && len(vals) > 0 {
+	if vals, ok := r.MultipartForm.Value["invite_token"]; ok && len(vals) > 0 && vals[0] != "" {
 		if !validate.IsValidInviteToken(vals[0]) {
 			s.sendProgress(sessionID, itemID, "error", 100, "Invalid invite token", nil)
 			errJSON(w, http.StatusForbidden, "invalid_invite")
@@ -70,6 +71,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	expectedSHA1 := strings.ToLower(strings.TrimSpace(r.FormValue("sha1")))
 	if expectedSHA1 != "" && !validate.IsValidSHA1Hex(expectedSHA1) {
 		errJSON(w, http.StatusBadRequest, "invalid_sha1")
+		return
+	}
+	// With the public upload page disabled, the invite token is the auth
+	// credential; reject before spooling anything to disk.
+	if !s.uploadAuthorized(w, r, sessionID, inviteToken) {
 		return
 	}
 
@@ -317,12 +323,95 @@ func nullable(s string) any {
 	return s
 }
 
+// inviteErrText maps invite rejection codes to the progress messages shown in
+// the upload queue UI.
+var inviteErrText = map[string]string{
+	"invalid_invite":           "Invalid invite token",
+	"invite_disabled":          "Invite disabled",
+	"invite_password_required": "Password required",
+	"invite_expired":           "Invite expired",
+	"invite_claimed":           "Invite already used",
+	"invite_exhausted":         "Invite already used up",
+}
+
+// inviteUsable runs the passive (non-claiming) invite checks: existence,
+// disabled, password authorization, expiry, and usage limits. Returns an
+// error code, or "" when the invite is usable by sessionID.
+func (s *Server) inviteUsable(inv *store.Invite, sess *session.Data, sessionID, token string) string {
+	if inv == nil {
+		return "invalid_invite"
+	}
+	if inv.Disabled {
+		return "invite_disabled"
+	}
+	if strOr(inv.PasswordHash) != "" && !sess.InviteAuth[token] {
+		return "invite_password_required"
+	}
+	if isExpired(inv.ExpiresAt) {
+		return "invite_expired"
+	}
+	maxUses := inv.MaxUsesOrDefault()
+	if maxUses == 1 {
+		// Allow the claiming session to continue; block different sessions.
+		if inv.Claimed && inv.ClaimedBySession != nil && *inv.ClaimedBySession != sessionID {
+			return "invite_claimed"
+		}
+	} else if maxUses >= 0 && inv.UsedCount >= maxUses {
+		// Negative max_uses means unlimited.
+		return "invite_exhausted"
+	}
+	return ""
+}
+
+// uploadAuthCode implements the auth rule shared by the upload endpoints and
+// the progress WebSocket. When the public upload page is disabled, the invite
+// token acts as the auth credential (a logged-in session also passes).
+// Returns "" when authorized, else an error code.
+func (s *Server) uploadAuthCode(r *http.Request, sessionID, inviteToken string) string {
+	if s.cfg.PublicUploadPageEnabled {
+		return ""
+	}
+	sess := s.sessions.Get(r)
+	if sess.AccessToken != "" {
+		return ""
+	}
+	if inviteToken == "" {
+		return "invite_required"
+	}
+	inv, err := s.store.GetInvite(inviteToken)
+	if err != nil {
+		slog.Error("invite lookup error", "err", err)
+		return "db_error"
+	}
+	return s.inviteUsable(inv, sess, sessionID, inviteToken)
+}
+
+// uploadAuthorized gates every upload endpoint via uploadAuthCode. It runs
+// before anything is spooled to disk and before any Immich traffic, so
+// anonymous requests cannot fill the chunk directory or probe checksums. With
+// PUBLIC_UPLOAD_PAGE_ENABLED=true all uploads are allowed (public drop box,
+// the previous behavior). On rejection the error response has been written
+// and false is returned.
+func (s *Server) uploadAuthorized(w http.ResponseWriter, r *http.Request, sessionID, inviteToken string) bool {
+	switch code := s.uploadAuthCode(r, sessionID, inviteToken); code {
+	case "":
+		return true
+	case "invite_required":
+		errJSON(w, http.StatusUnauthorized, code)
+	case "db_error":
+		errJSON(w, http.StatusInternalServerError, code)
+	default:
+		errJSON(w, http.StatusForbidden, code)
+	}
+	return false
+}
+
 // gateInvite enforces all invite restrictions for an upload. On failure it
 // writes the error response (and progress message) and returns ok=false; on
 // success it returns the invite's target album id/name.
 func (s *Server) gateInvite(w http.ResponseWriter, sess *session.Data, sessionID, itemID, token string) (albumID, albumName *string, ok bool) {
-	reject := func(httpStatus int, code, message string) (*string, *string, bool) {
-		if message != "" {
+	reject := func(httpStatus int, code string) (*string, *string, bool) {
+		if message := inviteErrText[code]; message != "" {
 			s.sendProgress(sessionID, itemID, "error", 100, message, nil)
 		}
 		errJSON(w, httpStatus, code)
@@ -334,52 +423,27 @@ func (s *Server) gateInvite(w http.ResponseWriter, sess *session.Data, sessionID
 		slog.Error("invite lookup error", "err", err)
 		inv = nil
 	}
-	if inv == nil {
-		return reject(http.StatusForbidden, "invalid_invite", "Invalid invite token")
-	}
-	if inv.Disabled {
-		return reject(http.StatusForbidden, "invite_disabled", "Invite disabled")
-	}
-	if strOr(inv.PasswordHash) != "" && !sess.InviteAuth[token] {
-		return reject(http.StatusForbidden, "invite_password_required", "Password required")
-	}
-	if isExpired(inv.ExpiresAt) {
-		return reject(http.StatusForbidden, "invite_expired", "Invite expired")
+	if code := s.inviteUsable(inv, sess, sessionID, token); code != "" {
+		return reject(http.StatusForbidden, code)
 	}
 
-	maxUses := inv.MaxUsesOrDefault()
-	if maxUses == 1 {
-		if inv.Claimed {
-			// Allow the claiming session to continue; block different sessions.
-			if inv.ClaimedBySession != nil && *inv.ClaimedBySession != sessionID {
-				return reject(http.StatusForbidden, "invite_claimed", "Invite already used")
-			}
-		} else {
-			// Atomically claim the one-time invite to prevent concurrent use.
-			claimed, err := s.store.ClaimInvite(token, sessionID)
+	if inv.MaxUsesOrDefault() == 1 && !inv.Claimed {
+		// Atomically claim the one-time invite to prevent concurrent use.
+		claimed, err := s.store.ClaimInvite(token, sessionID)
+		if err != nil {
+			slog.Error("invite claim failed", "err", err)
+			errJSON(w, http.StatusInternalServerError, "invite_claim_failed")
+			return nil, nil, false
+		}
+		if !claimed {
+			// Someone else just claimed; re-check the owner.
+			owner, err := s.store.InviteClaimOwner(token)
 			if err != nil {
-				slog.Error("invite claim failed", "err", err)
-				errJSON(w, http.StatusInternalServerError, "invite_claim_failed")
-				return nil, nil, false
+				owner = nil
 			}
-			if !claimed {
-				// Someone else just claimed; re-check the owner.
-				owner, err := s.store.InviteClaimOwner(token)
-				if err != nil {
-					owner = nil
-				}
-				if owner == nil || *owner != sessionID {
-					return reject(http.StatusForbidden, "invite_claimed", "Invite already used")
-				}
+			if owner == nil || *owner != sessionID {
+				return reject(http.StatusForbidden, "invite_claimed")
 			}
-		}
-	} else {
-		limit := maxUses
-		if limit < 0 {
-			limit = 1_000_000_000 // negative max_uses means unlimited
-		}
-		if inv.UsedCount >= limit {
-			return reject(http.StatusForbidden, "invite_exhausted", "Invite already used up")
 		}
 	}
 	return inv.AlbumID, inv.AlbumName, true

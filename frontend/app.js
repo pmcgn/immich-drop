@@ -87,6 +87,22 @@ function human(bytes){
   return (bytes/Math.pow(k,i)).toFixed(1)+' '+sizes[i];
 }
 
+// Server rejection codes -> user-facing messages. With the public upload page
+// disabled the backend requires a valid invite token (or login) on every
+// upload endpoint and answers with these codes.
+const ERROR_TEXT = {
+  invite_required: 'Uploads on this server require an invite link.',
+  invalid_invite: 'This invite link is not valid.',
+  invite_disabled: 'This invite link has been disabled.',
+  invite_expired: 'This invite link has expired.',
+  invite_claimed: 'This invite link has already been used.',
+  invite_exhausted: 'This invite link has no uses left.',
+  invite_password_required: 'This invite link requires a password.',
+};
+function errText(code, fallback){
+  return ERROR_TEXT[code] || code || fallback;
+}
+
 function escapeHtml(v){
   return String(v ?? '')
     .replaceAll('&','&amp;')
@@ -163,7 +179,9 @@ function render(){
 // --- WebSocket progress ---
 function openSocket(){
   socket = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-  socket.onopen = () => { socket.send(JSON.stringify({session_id: sessionId})); };
+  // The registration frame carries the invite token: with the public upload
+  // page disabled the server closes unauthorized sockets (code 1008).
+  socket.onopen = () => { socket.send(JSON.stringify({session_id: sessionId, invite_token: INVITE_TOKEN || ''})); };
   socket.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
     const { item_id, status, progress, message } = msg;
@@ -211,7 +229,7 @@ async function runQueue(){
       }
     }catch(err){
       next.status='error';
-      next.message = String(err);
+      next.message = (err && err.message) ? err.message : String(err);
       render();
     }finally{
       inflight--;
@@ -233,7 +251,7 @@ async function uploadWhole(next){
   const body = await res.json().catch(()=>({}));
   if(!res.ok && next.status!=='error'){
     next.status='error';
-    next.message = body.error || 'Upload failed';
+    next.message = errText(body.error, 'Upload failed');
     render();
   } else if (res.ok) {
     const statusText = (body && body.status) ? String(body.status) : '';
@@ -328,9 +346,11 @@ async function uploadChunked(next){
     next.message = '';
     render();
   } catch { sha1 = ''; }
-  // init
+  // init (network errors stay best-effort — the server tolerates a lost init —
+  // but an auth rejection means every later request would fail too, so abort)
+  let initRes = null;
   try {
-    await fetch('/api/upload/chunk/init', { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({
+    initRes = await fetch('/api/upload/chunk/init', { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({
       item_id: next.id,
       session_id: sessionId,
       name: next.file.name,
@@ -342,6 +362,10 @@ async function uploadChunked(next){
       sha1: sha1
     }) });
   } catch {}
+  if (initRes && (initRes.status === 401 || initRes.status === 403)) {
+    const j = await initRes.json().catch(()=>({}));
+    throw new Error(errText(j.error, 'Upload not allowed'));
+  }
   // upload parts
   let uploaded = 0;
   for (let i=0;i<total;i++){
@@ -359,7 +383,7 @@ async function uploadChunked(next){
     const r = await fetch('/api/upload/chunk', { method:'POST', body: fd });
     if (!r.ok) {
       const j = await r.json().catch(()=>({}));
-      throw new Error(j.error || `Chunk ${i} failed`);
+      throw new Error(errText(j.error, `Chunk ${i} failed`));
     }
     uploaded++;
     // Approximate progress until final server-side upload takes over
@@ -382,7 +406,7 @@ async function uploadChunked(next){
   const body = await rc.json().catch(()=>({}));
   if (!rc.ok && next.status!=='error'){
     next.status='error';
-    next.message = body.error || 'Upload failed';
+    next.message = errText(body.error, 'Upload failed');
     render();
   } else if (rc.ok) {
     const statusText = (body && body.status) ? String(body.status) : '';

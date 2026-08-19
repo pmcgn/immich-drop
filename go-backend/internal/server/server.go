@@ -50,7 +50,7 @@ func New(cfg *config.Settings, st *store.Store) *Server {
 		store:     st,
 		hub:       ws.NewHub(),
 		immich:    immich.NewClient(cfg.NormalizedBaseURL(), cfg.ImmichAPIKey),
-		sessions:  session.NewManager(cfg.SessionSecret),
+		sessions:  session.NewManager(cfg.SessionSecret, cfg.SecureCookies()),
 		uploadSem: sem,
 	}
 }

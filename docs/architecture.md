@@ -157,7 +157,7 @@ Loaded once at import time (`app/config.py`, `load_settings()`), from environmen
 | `IMMICH_BASE_URL` | `http://127.0.0.1:2283/api` | Immich API base (trailing `/` stripped) |
 | `IMMICH_API_KEY` | `""` | API key for anonymous uploads; also gates `/api/ping` (`ok:false` when empty) |
 | `IMMICH_ALBUM_NAME` | `""` | Default album for non-invite uploads (empty = none) |
-| `PUBLIC_UPLOAD_PAGE_ENABLED` | `false` | If false, `GET /` redirects to `/login`; invite pages still work |
+| `PUBLIC_UPLOAD_PAGE_ENABLED` | `false` | If false, `GET /` redirects to `/login` and the upload/chunk API endpoints require a valid, active invite token (or a login session); invite pages still work |
 | `PUBLIC_BASE_URL` | `""` | Absolute base for generated invite links (falls back to request base URL) |
 | `MAX_CONCURRENT` | `3` | **Loaded but unused** by the backend (client throttles itself to 3) |
 | `STATE_DB` | `/data/state.db` | SQLite file path |

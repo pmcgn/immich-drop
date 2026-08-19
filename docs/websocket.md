@@ -10,13 +10,17 @@ Upload progress is pushed from backend to browser over a single WebSocket per pa
 2. Frontend opens `ws(s)://{host}/ws` and immediately sends **one** text frame:
 
    ```json
-   {"session_id": "<session id>"}
+   {"session_id": "<session id>", "invite_token": "<invite token or empty>"}
    ```
 
    If the first frame is missing/invalid JSON, the backend falls back to session id
-   `"default"`.
-3. Backend registers the socket in an in-memory hub under that session id. Multiple sockets
-   may share one session id (all receive every message).
+   `"default"`. The frame must arrive within 10 s of the upgrade, otherwise the
+   socket is closed.
+3. The registration is subject to the same auth rule as the upload endpoints: with
+   `PUBLIC_UPLOAD_PAGE_ENABLED=false`, a login session or a valid, active invite token
+   is required — unauthorized sockets are closed with code 1008 (policy violation).
+   The backend then registers the socket in an in-memory hub under that session id.
+   Multiple sockets may share one session id (all receive every message).
 4. Side effect: if this is the first socket for a session id not currently in the hub, the
    backend **resets its cached default-album id** (so a freshly opened page re-resolves the
    album by name).

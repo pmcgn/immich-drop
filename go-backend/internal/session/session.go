@@ -31,13 +31,15 @@ type Data struct {
 	InviteAuth  map[string]bool `json:"inviteAuth,omitempty"`
 }
 
-// Manager signs and verifies session cookies.
+// Manager signs and verifies session cookies. With secure set, cookies carry
+// the Secure flag so browsers never send them over plain HTTP.
 type Manager struct {
 	secret []byte
+	secure bool
 }
 
-func NewManager(secret string) *Manager {
-	return &Manager{secret: []byte(secret)}
+func NewManager(secret string, secure bool) *Manager {
+	return &Manager{secret: []byte(secret), secure: secure}
 }
 
 func (m *Manager) sign(payload []byte) string {
@@ -84,6 +86,7 @@ func (m *Manager) Save(w http.ResponseWriter, d *Data) {
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
+		Secure:   m.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -96,6 +99,7 @@ func (m *Manager) Clear(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   m.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

@@ -70,13 +70,17 @@ func extractIDs(w http.ResponseWriter, body map[string]any) (sessionID, itemID s
 }
 
 // extractInviteToken validates an optional invite_token in a JSON body.
-// Returns ok=false (with the response written) when present but malformed.
+// Absent, null, or empty means "no token" (the frontend sends "" outside
+// invite pages); a malformed value is rejected (ok=false, response written).
 func extractInviteToken(w http.ResponseWriter, body map[string]any) (string, bool) {
 	v, present := body["invite_token"]
 	if !present || v == nil {
 		return "", true
 	}
 	token, isStr := v.(string)
+	if isStr && token == "" {
+		return "", true
+	}
 	if !isStr || !validate.IsValidInviteToken(token) {
 		errJSON(w, http.StatusForbidden, "invalid_invite")
 		return "", false
@@ -128,6 +132,10 @@ func (s *Server) handleChunkInit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Auth gate before the spool directory is created (see uploadAuthorized).
+	if !s.uploadAuthorized(w, r, sessionID, inviteToken) {
+		return
+	}
 	dir, err := s.chunkDir(sessionID, itemID)
 	if err != nil {
 		errJSON(w, http.StatusBadRequest, "invalid_ids")
@@ -173,7 +181,7 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inviteToken := ""
-	if vals, ok := r.MultipartForm.Value["invite_token"]; ok && len(vals) > 0 {
+	if vals, ok := r.MultipartForm.Value["invite_token"]; ok && len(vals) > 0 && vals[0] != "" {
 		if !validate.IsValidInviteToken(vals[0]) {
 			errJSON(w, http.StatusForbidden, "invalid_invite")
 			return
@@ -186,6 +194,10 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		!(totalChunks > 0 && totalChunks <= validate.MaxChunks) ||
 		!(chunkIndex >= 0 && chunkIndex < totalChunks) {
 		errJSON(w, http.StatusBadRequest, "invalid_chunk_index")
+		return
+	}
+	// Auth gate before any part lands on disk (see uploadAuthorized).
+	if !s.uploadAuthorized(w, r, sessionID, inviteToken) {
 		return
 	}
 
@@ -255,6 +267,10 @@ func (s *Server) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
 	// init request was lost.
 	expectedSHA1, ok := extractSHA1(w, body)
 	if !ok {
+		return
+	}
+	// Auth gate before assembling and before any Immich traffic.
+	if !s.uploadAuthorized(w, r, sessionID, inviteToken) {
 		return
 	}
 	name := "upload.bin"

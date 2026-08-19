@@ -40,9 +40,12 @@ func (s *Server) wsOriginAllowed(r *http.Request) bool {
 }
 
 // handleWS is the WebSocket endpoint for pushing per-item upload progress.
-// Protocol: first client frame registers the session ({"session_id": "..."}),
-// then the server broadcasts progress and sends {"type":"ping"} after 30 s of
-// client silence to defeat proxy idle timeouts.
+// Protocol: first client frame registers the session
+// ({"session_id": "...", "invite_token": "..."}), then the server broadcasts
+// progress and sends {"type":"ping"} after 30 s of client silence to defeat
+// proxy idle timeouts. The registration is subject to the same auth rule as
+// the upload endpoints (uploadAuthCode): with the public upload page disabled,
+// a login session or a valid invite token is required.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -55,17 +58,31 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn := ws.NewConn(rawConn)
 
+	// The registration frame must arrive promptly: sockets that never register
+	// are not in the hub, so without a deadline they would tie up goroutines
+	// and file descriptors while bypassing the hub's connection limits.
 	sessionID := "default"
+	_ = rawConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, initFrame, err := conn.ReadMessage()
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
+	_ = rawConn.SetReadDeadline(time.Time{})
 	var init struct {
-		SessionID string `json:"session_id"`
+		SessionID   string `json:"session_id"`
+		InviteToken string `json:"invite_token"`
 	}
 	if json.Unmarshal(initFrame, &init) == nil && validate.IsValidClientID(init.SessionID) {
 		sessionID = init.SessionID
+	}
+	inviteToken := ""
+	if validate.IsValidInviteToken(init.InviteToken) {
+		inviteToken = init.InviteToken
+	}
+	if s.uploadAuthCode(r, sessionID, inviteToken) != "" {
+		conn.CloseWithCode(websocket.ClosePolicyViolation) // 1008: not authorized
+		return
 	}
 
 	// First socket of a (possibly new) session: reset the album cache so a

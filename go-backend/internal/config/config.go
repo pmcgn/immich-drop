@@ -51,6 +51,12 @@ func (s *Settings) SplitPorts() bool {
 	return s.AdminPort != ""
 }
 
+// SecureCookies reports whether session cookies should carry the Secure flag:
+// the deployment is reached over HTTPS according to PUBLIC_BASE_URL.
+func (s *Settings) SecureCookies() bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(s.PublicBaseURL)), "https://")
+}
+
 // NormalizedBaseURL returns the Immich base URL without a trailing slash.
 func (s *Settings) NormalizedBaseURL() string {
 	return strings.TrimRight(s.ImmichBaseURL, "/")

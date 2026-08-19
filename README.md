@@ -266,6 +266,12 @@ You can keep a checked‑in `/.env.example` with the keys above for onboarding.
 - The menu and invite creation are behind login. Logout clears the session.  
 - Invite links are public by URL; share only with intended recipients.  
 - The default uploader page at `/` is disabled unless `PUBLIC_UPLOAD_PAGE_ENABLED=true`.  
+- With `PUBLIC_UPLOAD_PAGE_ENABLED=false`, the upload API itself also requires
+  authentication: every upload/chunk request must carry a valid, active invite
+  token (or come from a logged-in session). Requests without one are rejected
+  before anything is written to disk or forwarded to Immich.  
+- Session cookies are marked `Secure` automatically when `PUBLIC_BASE_URL`
+  starts with `https://`.  
 - The Immich API key remains **server‑side**; the browser never sees it.  
 - No browsing of uploaded media; only ephemeral session state is shown.  
 - Run behind HTTPS with a reverse proxy and restrict CORS to your domain(s).
