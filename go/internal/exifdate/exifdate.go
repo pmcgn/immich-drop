@@ -6,7 +6,7 @@
 package exifdate
 
 import (
-	"bytes"
+	"io"
 	"time"
 
 	"github.com/rwcarlsen/goexif/exif"
@@ -16,15 +16,16 @@ const exifLayout = "2006:01:02 15:04:05"
 
 // Read returns (created, modified) or nils when unavailable. Timestamps are
 // naive in EXIF; they are interpreted as UTC, matching the Python behavior of
-// serializing them with a "Z" suffix.
-func Read(raw []byte) (created, modified *time.Time) {
+// serializing them with a "Z" suffix. r is typically a spool file; only the
+// image header is consumed.
+func Read(r io.Reader) (created, modified *time.Time) {
 	defer func() {
 		// goexif can panic on malformed input; treat that as "no EXIF".
-		if r := recover(); r != nil {
+		if rec := recover(); rec != nil {
 			created, modified = nil, nil
 		}
 	}()
-	x, err := exif.Decode(bytes.NewReader(raw))
+	x, err := exif.Decode(r)
 	if err != nil {
 		return nil, nil
 	}

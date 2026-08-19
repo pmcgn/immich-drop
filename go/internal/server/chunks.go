@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"immich-drop/internal/validate"
 )
@@ -83,6 +84,30 @@ func extractInviteToken(w http.ResponseWriter, body map[string]any) (string, boo
 	return token, true
 }
 
+// extractSHA1 validates an optional client-computed sha1 in a JSON body.
+// Absent, null, or empty means "no verification"; a malformed value is
+// rejected (ok=false, response written).
+func extractSHA1(w http.ResponseWriter, body map[string]any) (string, bool) {
+	v, present := body["sha1"]
+	if !present || v == nil {
+		return "", true
+	}
+	str, isStr := v.(string)
+	if !isStr {
+		errJSON(w, http.StatusBadRequest, "invalid_sha1")
+		return "", false
+	}
+	str = strings.ToLower(strings.TrimSpace(str))
+	if str == "" {
+		return "", true
+	}
+	if !validate.IsValidSHA1Hex(str) {
+		errJSON(w, http.StatusBadRequest, "invalid_sha1")
+		return "", false
+	}
+	return str, true
+}
+
 // handleChunkInit creates the spool directory and records the file metadata.
 func (s *Server) handleChunkInit(w http.ResponseWriter, r *http.Request) {
 	body := decodeJSONBody(r)
@@ -95,6 +120,11 @@ func (s *Server) handleChunkInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inviteToken, ok := extractInviteToken(w, body)
+	if !ok {
+		return
+	}
+	// Optional whole-file SHA-1 computed by the client; verified after assembly.
+	sha1Hex, ok := extractSHA1(w, body)
 	if !ok {
 		return
 	}
@@ -118,6 +148,7 @@ func (s *Server) handleChunkInit(w http.ResponseWriter, r *http.Request) {
 		"size":          validate.ParseNonNegInt(body["size"], 1<<40),
 		"last_modified": validate.ParseEpochMS(body["last_modified"]),
 		"invite_token":  nullable(inviteToken),
+		"sha1":          nullable(sha1Hex),
 		"content_type":  contentType,
 		"created_at":    nowNaiveUTC(),
 	}
@@ -186,9 +217,13 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	content, err := io.ReadAll(file)
+	// Stream the part straight to disk; chunk content is never held in memory.
+	dst, err := os.Create(partPath(dir, chunkIndex))
 	if err == nil {
-		err = os.WriteFile(partPath(dir, chunkIndex), content, 0o644)
+		_, err = io.Copy(dst, file)
+		if cerr := dst.Close(); err == nil {
+			err = cerr
+		}
 	}
 	if err != nil {
 		slog.Error("chunk write failed", "err", err)
@@ -215,6 +250,13 @@ func (s *Server) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The expected SHA-1 may arrive in this body or (normally) in the meta
+	// recorded at init; the body value wins so verification still works if the
+	// init request was lost.
+	expectedSHA1, ok := extractSHA1(w, body)
+	if !ok {
+		return
+	}
 	name := "upload.bin"
 	if cleaned := validate.CleanText(body["name"], validate.MaxNameLen); cleaned != nil && *cleaned != "" {
 		name = *cleaned
@@ -230,6 +272,11 @@ func (s *Server) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta := readMeta(dir)
+	if expectedSHA1 == "" {
+		if fromMeta, _ := meta["sha1"].(string); validate.IsValidSHA1Hex(fromMeta) {
+			expectedSHA1 = fromMeta
+		}
+	}
 	totalAny := meta["total_chunks"]
 	if totalAny == nil {
 		totalAny = body["total_chunks"]
@@ -243,12 +290,9 @@ func (s *Server) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify all parts exist and pre-size the assembly buffer before taking
-	// an upload slot or allocating anything large.
-	var totalSize int64
+	// Verify all parts exist before taking an upload slot.
 	for i := int64(0); i < totalChunks; i++ {
-		st, err := os.Stat(partPath(dir, i))
-		if err != nil {
+		if _, err := os.Stat(partPath(dir, i)); err != nil {
 			if os.IsNotExist(err) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing_part", "index": i})
 				return
@@ -257,33 +301,45 @@ func (s *Server) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
 			errJSON(w, http.StatusInternalServerError, "assemble_failed")
 			return
 		}
-		totalSize += st.Size()
 	}
 
-	// Take an upload slot before buffering the assembled file into memory.
 	release := s.acquireUploadSlot()
 	defer release()
 
-	// Assemble parts in order.
-	raw := make([]byte, 0, totalSize)
+	// Concatenate the parts into one on-disk spool file; nothing is buffered
+	// in memory and the upload later streams straight from this file.
+	spool, err := os.Create(filepath.Join(dir, "assembled.bin"))
+	if err != nil {
+		slog.Error("assemble failed", "err", err)
+		errJSON(w, http.StatusInternalServerError, "assemble_failed")
+		return
+	}
+	defer removeSpool(spool, dir)
+	var totalSize int64
 	for i := int64(0); i < totalChunks; i++ {
-		part, err := os.ReadFile(partPath(dir, i))
+		part, err := os.Open(partPath(dir, i))
+		if err == nil {
+			var n int64
+			n, err = io.Copy(spool, part)
+			totalSize += n
+			_ = part.Close()
+		}
 		if err != nil {
 			slog.Error("assemble failed", "err", err)
 			errJSON(w, http.StatusInternalServerError, "assemble_failed")
 			return
 		}
-		raw = append(raw, part...)
 	}
-	// Cleanup parts promptly (best-effort).
+	// Cleanup parts promptly (best-effort); the spool file is removed by the
+	// deferred removeSpool once the pipeline has finished with it.
 	for i := int64(0); i < totalChunks; i++ {
 		_ = os.Remove(partPath(dir, i))
 	}
 	_ = os.Remove(filepath.Join(dir, "meta.json"))
-	_ = os.Remove(dir)
 
 	s.runUploadPipeline(w, r, uploadInput{
-		raw:          raw,
+		spool:        spool,
+		size:         totalSize,
 		fileName:     name,
 		contentType:  contentType,
 		lastModified: validate.ParseEpochMS(body["last_modified"]),
@@ -291,6 +347,7 @@ func (s *Server) handleChunkComplete(w http.ResponseWriter, r *http.Request) {
 		itemID:       itemID,
 		inviteToken:  inviteToken,
 		fingerprint:  cleanFingerprintAny(body["fingerprint"]),
+		expectedSHA1: expectedSHA1,
 	})
 }
 

@@ -7,6 +7,7 @@ package ws
 import (
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -14,6 +15,11 @@ import (
 const (
 	MaxSessions          = 1000
 	MaxSocketsPerSession = 8
+	// writeTimeout bounds every frame write so a stalled client socket (full
+	// send buffer, frozen peer) cannot block progress sends — and with them the
+	// upload goroutine — indefinitely. Writes that miss the deadline fail, and
+	// the hub then drops the socket like any other failed one.
+	writeTimeout = 5 * time.Second
 )
 
 // Conn wraps a websocket connection with a write mutex (gorilla/websocket
@@ -25,10 +31,12 @@ type Conn struct {
 
 func NewConn(ws *websocket.Conn) *Conn { return &Conn{ws: ws} }
 
-// WriteText sends one text frame, serialized with the connection's write lock.
+// WriteText sends one text frame, serialized with the connection's write lock
+// and bounded by writeTimeout.
 func (c *Conn) WriteText(data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.ws.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -41,6 +49,7 @@ func (c *Conn) Close() error { return c.ws.Close() }
 // CloseWithCode sends a close frame with the given code, then closes.
 func (c *Conn) CloseWithCode(code int) {
 	c.mu.Lock()
+	_ = c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_ = c.ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""))
 	c.mu.Unlock()
 	_ = c.ws.Close()

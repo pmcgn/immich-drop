@@ -21,6 +21,8 @@ var (
 	fingerprintRe = regexp.MustCompile(`^[A-Za-z0-9._:|-]{1,128}$`)
 	// Immich album ids are UUIDs.
 	albumIDRe = regexp.MustCompile(`^[0-9a-fA-F-]{1,64}$`)
+	// Client-computed file checksums are SHA-1 hex digests.
+	sha1HexRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
 const (
@@ -45,6 +47,11 @@ func IsValidClientID(value string) bool {
 // IsValidAlbumID reports whether value looks like an Immich album id.
 func IsValidAlbumID(value string) bool {
 	return albumIDRe.MatchString(value)
+}
+
+// IsValidSHA1Hex reports whether value is a lowercase SHA-1 hex digest.
+func IsValidSHA1Hex(value string) bool {
+	return sha1HexRe.MatchString(value)
 }
 
 // CleanFingerprint returns the fingerprint if well-formed, else "".

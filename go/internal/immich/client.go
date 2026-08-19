@@ -193,9 +193,10 @@ func (c *Client) BulkUploadCheck(checks []map[string]string) map[string]BulkChec
 // UploadParams describes one asset upload to POST /assets.
 type UploadParams struct {
 	AccessToken   string
-	FileName      string // sanitized name sent to Immich
+	FileName      string    // sanitized name sent to Immich
 	ContentType   string
-	Data          []byte
+	Data          io.Reader // file content, streamed (typically a disk spool file)
+	Size          int64     // exact length of Data in bytes
 	DeviceAssetID string
 	DeviceID      string
 	CreatedISO    string
@@ -216,17 +217,17 @@ type UploadResult struct {
 // on change (mirrors the Python MultipartEncoderMonitor callback).
 type progressReader struct {
 	r       io.Reader
-	total   int
-	read    int
+	total   int64
+	read    int64
 	lastPct int
 	cb      func(int)
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
 	n, err := p.r.Read(b)
-	p.read += n
+	p.read += int64(n)
 	if p.total > 0 && p.cb != nil {
-		pct := p.read * 100 / p.total
+		pct := int(p.read * 100 / p.total)
 		if pct != p.lastPct {
 			p.lastPct = pct
 			p.cb(pct)
@@ -235,9 +236,9 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// UploadAsset posts the multipart asset payload to Immich. The file bytes are
-// streamed from p.Data rather than copied into the multipart buffer, keeping
-// peak memory at ~1× the file size (only the tiny envelope is buffered).
+// UploadAsset posts the multipart asset payload to Immich. The file content is
+// streamed from p.Data (a disk spool file) rather than buffered, so memory use
+// is constant regardless of file size (only the tiny envelope is buffered).
 func (c *Client) UploadAsset(p UploadParams) (*UploadResult, error) {
 	// Build the multipart envelope: all simple fields, then the assetData part
 	// header (prefix); the closing boundary (suffix) follows the file bytes.
@@ -275,23 +276,23 @@ func (c *Client) UploadAsset(p UploadParams) (*UploadResult, error) {
 	}
 	suffix := envelope.Bytes()[len(prefix):]
 
-	total := len(prefix) + len(p.Data) + len(suffix)
+	total := int64(len(prefix)) + p.Size + int64(len(suffix))
 	body := &progressReader{
-		r:     io.MultiReader(bytes.NewReader(prefix), bytes.NewReader(p.Data), bytes.NewReader(suffix)),
+		r:     io.MultiReader(bytes.NewReader(prefix), p.Data, bytes.NewReader(suffix)),
 		total: total,
 		cb:    p.OnProgress,
 	}
 	// The Python version used a flat 120 s, which caps uploads at ~1 GB on a
 	// fast link. Scale with size instead (floor of ~1 MiB/s) so multi-GB
 	// videos can finish while stalled transfers still get cancelled.
-	timeout := 120*time.Second + time.Duration(len(p.Data)>>20)*time.Second
+	timeout := 120*time.Second + time.Duration(p.Size>>20)*time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/assets", body)
 	if err != nil {
 		return nil, err
 	}
-	req.ContentLength = int64(total)
+	req.ContentLength = total
 	c.applyAuth(req, p.AccessToken)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("x-immich-checksum", p.Checksum)

@@ -141,6 +141,14 @@ components:
         content_type:
           type: string
           default: application/octet-stream
+        sha1:
+          type: string
+          nullable: true
+          pattern: "^[0-9a-f]{40}$"
+          description: >
+            Optional client-computed SHA-1 of the whole file. When present, the
+            server verifies the assembled file against it at complete time and
+            rejects with `checksum_mismatch` (400) before contacting Immich.
       required: [item_id, session_id]
 
     ChunkCompleteRequest:
@@ -168,6 +176,13 @@ components:
         content_type:
           type: string
           default: application/octet-stream
+        sha1:
+          type: string
+          nullable: true
+          pattern: "^[0-9a-f]{40}$"
+          description: >
+            Optional client-computed SHA-1 of the whole file; overrides the one
+            recorded at init (fallback if the init request was lost).
       required: [item_id, session_id]
 
     LoginRequest:
@@ -656,9 +671,10 @@ paths:
       tags: [upload]
       summary: Assemble chunks and run the normal upload pipeline
       description: >
-        Concatenates all parts (in memory), deletes the temp files, then behaves
-        exactly like POST /api/upload (dedupe, invite gating, Immich forward,
-        album assignment, WS progress, audit log).
+        Concatenates all parts, deletes the temp files, verifies the client
+        SHA-1 when one was supplied, then behaves exactly like POST /api/upload
+        (dedupe, invite gating, Immich forward, album assignment, WS progress,
+        audit log).
       requestBody:
         required: true
         content:
@@ -674,9 +690,10 @@ paths:
                 $ref: "#/components/schemas/UploadResult"
         "400":
           description: >
-            invalid_json, missing_ids, missing_total, or missing_part (includes
-            `index` of the first missing part). Also Immich upload rejection, as
-            in POST /api/upload.
+            invalid_json, missing_ids, missing_total, invalid_sha1, or
+            missing_part (includes `index` of the first missing part).
+            checksum_mismatch when a client-supplied sha1 does not match the
+            assembled file. Also Immich upload rejection, as in POST /api/upload.
           content:
             application/json:
               schema:

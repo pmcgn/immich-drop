@@ -34,8 +34,9 @@ type Server struct {
 	albumID string
 
 	// uploadSem enforces MAX_CONCURRENT server-side (the Python version only
-	// loaded it). Files are held fully in memory during upload, so this also
-	// bounds peak memory to MAX_CONCURRENT × file size. Nil = unlimited.
+	// loaded it). File content is spooled to disk (CHUNK_DIR), so this bounds
+	// concurrent Immich transfers and spool disk churn, not memory.
+	// Nil = unlimited.
 	uploadSem chan struct{}
 }
 

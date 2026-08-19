@@ -246,9 +246,88 @@ async function uploadWhole(next){
   }
 }
 
+// --- Streaming SHA-1 (RFC 3174) ---
+// WebCrypto's crypto.subtle.digest cannot hash incrementally (it needs the
+// whole file in memory), and chunked uploads exist precisely so large files
+// never do — so the whole-file hash is computed with this small hasher over
+// file slices. The server recomputes the SHA-1 of the assembled file and
+// rejects the upload with `checksum_mismatch` if it differs.
+class StreamingSHA1 {
+  constructor(){
+    this.h0=0x67452301; this.h1=0xEFCDAB89; this.h2=0x98BADCFE; this.h3=0x10325476; this.h4=0xC3D2E1F0;
+    this.tail=new Uint8Array(64); this.tailLen=0; this.bytes=0; this.w=new Int32Array(80);
+  }
+  update(u8){
+    this.bytes += u8.length;
+    let off = 0;
+    if (this.tailLen > 0){
+      const n = Math.min(64 - this.tailLen, u8.length);
+      this.tail.set(u8.subarray(0, n), this.tailLen);
+      this.tailLen += n; off = n;
+      if (this.tailLen === 64){ this._block(this.tail, 0); this.tailLen = 0; }
+    }
+    while (off + 64 <= u8.length){ this._block(u8, off); off += 64; }
+    if (off < u8.length){ this.tail.set(u8.subarray(off)); this.tailLen = u8.length - off; }
+  }
+  _block(b, o){
+    const w = this.w;
+    for (let i=0;i<16;i++,o+=4){ w[i]=(b[o]<<24)|(b[o+1]<<16)|(b[o+2]<<8)|b[o+3]; }
+    for (let i=16;i<80;i++){ const x=w[i-3]^w[i-8]^w[i-14]^w[i-16]; w[i]=(x<<1)|(x>>>31); }
+    let a=this.h0,bb=this.h1,c=this.h2,d=this.h3,e=this.h4;
+    for (let i=0;i<80;i++){
+      let f,k;
+      if(i<20){ f=(bb&c)|((~bb)&d); k=0x5A827999; }
+      else if(i<40){ f=bb^c^d; k=0x6ED9EBA1; }
+      else if(i<60){ f=(bb&c)|(bb&d)|(c&d); k=0x8F1BBCDC; }
+      else { f=bb^c^d; k=0xCA62C1D6; }
+      const t=(((a<<5)|(a>>>27))+f+e+k+w[i])|0;
+      e=d; d=c; c=(bb<<30)|(bb>>>2); bb=a; a=t;
+    }
+    this.h0=(this.h0+a)|0; this.h1=(this.h1+bb)|0; this.h2=(this.h2+c)|0; this.h3=(this.h3+d)|0; this.h4=(this.h4+e)|0;
+  }
+  hex(){
+    // 64-bit big-endian bit length; JS bit-ops are 32-bit, so split via math
+    const hi = Math.floor(this.bytes / 0x20000000);      // bits >> 32
+    const lo = (this.bytes % 0x20000000) * 8;            // bits & 0xffffffff
+    const pad = new Uint8Array((this.tailLen < 56 ? 64 : 128) - this.tailLen);
+    pad[0] = 0x80;
+    const dv = new DataView(pad.buffer);
+    dv.setUint32(pad.length - 8, hi);
+    dv.setUint32(pad.length - 4, lo >>> 0);
+    this.update(pad);
+    return [this.h0,this.h1,this.h2,this.h3,this.h4].map(x => (x>>>0).toString(16).padStart(8,'0')).join('');
+  }
+}
+
+// sha1File hashes a File/Blob in 8 MB slices without holding it in memory.
+async function sha1File(file, onProgress){
+  const hasher = new StreamingSHA1();
+  const step = 8 * 1024 * 1024;
+  for (let off = 0; off < file.size; off += step){
+    const buf = await file.slice(off, Math.min(file.size, off + step)).arrayBuffer();
+    hasher.update(new Uint8Array(buf));
+    if (onProgress) onProgress(Math.min(off + step, file.size), file.size);
+  }
+  return hasher.hex();
+}
+
 async function uploadChunked(next){
   const chunkBytes = Math.max(1, CFG.chunk_size_mb|0) * 1024 * 1024;
   const total = Math.ceil(next.file.size / chunkBytes) || 1;
+  // Hash the whole file up front so the server can verify the assembled
+  // result before forwarding to Immich. Best-effort: on any failure the
+  // upload proceeds without verification (empty sha1 = skip).
+  let sha1 = '';
+  try {
+    next.message = 'Computing checksum…';
+    render();
+    sha1 = await sha1File(next.file, (done, totalBytes) => {
+      next.message = `Computing checksum… ${Math.floor((done/totalBytes)*100)}%`;
+      render();
+    });
+    next.message = '';
+    render();
+  } catch { sha1 = ''; }
   // init
   try {
     await fetch('/api/upload/chunk/init', { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({
@@ -259,7 +338,8 @@ async function uploadChunked(next){
       last_modified: next.file.lastModified || '',
       invite_token: INVITE_TOKEN || '',
       content_type: next.file.type || 'application/octet-stream',
-      fingerprint: FINGERPRINT
+      fingerprint: FINGERPRINT,
+      sha1: sha1
     }) });
   } catch {}
   // upload parts
@@ -287,7 +367,7 @@ async function uploadChunked(next){
     next.progress = Math.min(90, Math.floor((uploaded/total) * 60) + 20); // stay under 100 until WS finish
     render();
   }
-  // complete
+  // complete (sha1 repeated here in case the init request was lost)
   const rc = await fetch('/api/upload/chunk/complete', { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({
     item_id: next.id,
     session_id: sessionId,
@@ -296,7 +376,8 @@ async function uploadChunked(next){
     invite_token: INVITE_TOKEN || '',
     content_type: next.file.type || 'application/octet-stream',
     fingerprint: FINGERPRINT,
-    total_chunks: total
+    total_chunks: total,
+    sha1: sha1
   }) });
   const body = await rc.json().catch(()=>({}));
   if (!rc.ok && next.status!=='error'){

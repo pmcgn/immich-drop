@@ -7,6 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"immich-drop/internal/exifdate"
@@ -18,15 +21,27 @@ import (
 // uploadInput is one file to push through the shared upload pipeline. The
 // Python version duplicated this flow between /api/upload and
 // /api/upload/chunk/complete; here both handlers feed runUploadPipeline.
+// File content lives in a disk spool file under CHUNK_DIR (never in memory);
+// the pipeline seeks it as needed and the handler that created it removes it.
 type uploadInput struct {
-	raw          []byte
-	fileName     string // original, unsanitized client filename
+	spool        *os.File // read/write spool file holding the full content
+	size         int64    // exact content length in bytes
+	fileName     string   // original, unsanitized client filename
 	contentType  string
 	lastModified *int64 // epoch millis, already validated
 	sessionID    string // already validated
 	itemID       string // already validated
 	inviteToken  string // "" when absent; format already validated
 	fingerprint  string // already cleaned
+	expectedSHA1 string // client-computed SHA-1 hex ("" = no verification), already validated
+}
+
+// removeSpool closes and deletes a spool file, then prunes its (now empty)
+// item directory. Best-effort: the sweeper collects anything left behind.
+func removeSpool(f *os.File, dir string) {
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+	_ = os.Remove(dir)
 }
 
 // handleUpload receives a whole file, checks duplicates, and forwards it to
@@ -51,8 +66,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		inviteToken = vals[0]
 	}
+	// Optional client-computed SHA-1 for end-to-end integrity verification.
+	expectedSHA1 := strings.ToLower(strings.TrimSpace(r.FormValue("sha1")))
+	if expectedSHA1 != "" && !validate.IsValidSHA1Hex(expectedSHA1) {
+		errJSON(w, http.StatusBadRequest, "invalid_sha1")
+		return
+	}
 
-	// Take an upload slot before buffering the file into memory.
+	// Take an upload slot before spooling the file to disk.
 	release := s.acquireUploadSlot()
 	defer release()
 
@@ -62,14 +83,35 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(file)
+
+	// Spool the content to disk under CHUNK_DIR (same {session}/{item} layout
+	// as chunked uploads, so the TTL sweeper collects any leftovers).
+	dir, err := s.chunkDir(sessionID, itemID)
+	if err != nil {
+		errJSON(w, http.StatusBadRequest, "invalid_ids")
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Error("upload spool failed", "err", err)
+		errJSON(w, http.StatusInternalServerError, "spool_failed")
+		return
+	}
+	spool, err := os.Create(filepath.Join(dir, "spool.bin"))
+	if err != nil {
+		slog.Error("upload spool failed", "err", err)
+		errJSON(w, http.StatusInternalServerError, "spool_failed")
+		return
+	}
+	defer removeSpool(spool, dir)
+	size, err := io.Copy(spool, file)
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	s.runUploadPipeline(w, r, uploadInput{
-		raw:          raw,
+		spool:        spool,
+		size:         size,
 		fileName:     header.Filename,
 		contentType:  header.Header.Get("Content-Type"),
 		lastModified: validate.ParseEpochMS(r.FormValue("last_modified")),
@@ -77,6 +119,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		itemID:       itemID,
 		inviteToken:  inviteToken,
 		fingerprint:  validate.CleanFingerprint(r.FormValue("fingerprint")),
+		expectedSHA1: expectedSHA1,
 	})
 }
 
@@ -85,12 +128,38 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 // response and WebSocket progress along the way.
 func (s *Server) runUploadPipeline(w http.ResponseWriter, r *http.Request, in uploadInput) {
 	sess := s.sessions.Get(r)
-	size := int64(len(in.raw))
-	sum := sha1.Sum(in.raw)
-	checksum := hex.EncodeToString(sum[:])
+	size := in.size
+
+	// SHA-1 of the spooled content; must be known before the Immich call
+	// (x-immich-checksum header and bulk-check).
+	h := sha1.New()
+	if _, err := in.spool.Seek(0, io.SeekStart); err != nil {
+		errJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := io.Copy(h, in.spool); err != nil {
+		errJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	checksum := hex.EncodeToString(h.Sum(nil))
+
+	// Integrity check against the client-computed hash (sent at chunk/init):
+	// a mismatch means bytes were lost or corrupted between browser and server,
+	// so reject before any Immich traffic. Absent hash = no verification
+	// (older clients, whole-file uploads).
+	if in.expectedSHA1 != "" && in.expectedSHA1 != checksum {
+		slog.Warn("upload checksum mismatch", "file", in.fileName,
+			"expected", in.expectedSHA1, "actual", checksum, "size", size)
+		s.sendProgress(in.sessionID, in.itemID, "error", 100,
+			"Checksum mismatch — the upload arrived corrupted, please retry", nil)
+		errJSON(w, http.StatusBadRequest, "checksum_mismatch")
+		return
+	}
 
 	// Timestamps: EXIF wins, then the client's last-modified, then now.
-	exifCreated, exifModified := exifdate.Read(in.raw)
+	// exifdate only consumes the image header, so a plain re-seek suffices.
+	_, _ = in.spool.Seek(0, io.SeekStart)
+	exifCreated, exifModified := exifdate.Read(in.spool)
 	createdAt := time.Now().UTC()
 	if exifCreated != nil {
 		createdAt = *exifCreated
@@ -157,11 +226,17 @@ func (s *Server) runUploadPipeline(w http.ResponseWriter, r *http.Request, in up
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	if _, err := in.spool.Seek(0, io.SeekStart); err != nil {
+		s.sendProgress(in.sessionID, in.itemID, "error", 100, err.Error(), nil)
+		errJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	result, err := s.immich.UploadAsset(immich.UploadParams{
 		AccessToken:   sess.AccessToken,
 		FileName:      safeName,
 		ContentType:   contentType,
-		Data:          in.raw,
+		Data:          in.spool,
+		Size:          size,
 		DeviceAssetID: deviceAssetID,
 		// The "python-" prefix is kept for continuity with assets already
 		// uploaded by the Python version (visible in Immich metadata only).

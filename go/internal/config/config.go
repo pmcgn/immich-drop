@@ -28,8 +28,11 @@ type Settings struct {
 	ChunkedUploadsEnabled   bool
 	ChunkSizeMB             int
 
-	// ChunkDir is where chunked-upload parts are spooled. The Python version
-	// hardcoded /data/chunks; CHUNK_DIR makes it configurable with the same default.
+	// ChunkDir is the on-disk upload cache: chunked-upload parts, assembled
+	// files, and whole-file upload spools all live here (file content is never
+	// held in memory). The Python version hardcoded /data/chunks; CHUNK_DIR
+	// makes it configurable with the same default, so it can be volume-mounted
+	// outside the container to survive pod recreation.
 	ChunkDir string
 	// FrontendDir is the directory containing the static frontend files.
 	FrontendDir string

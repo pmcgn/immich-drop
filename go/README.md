@@ -19,7 +19,10 @@ with `FRONTEND_DIR`. All other environment variables match the Python version
 (`IMMICH_BASE_URL`, `IMMICH_API_KEY`, `IMMICH_ALBUM_NAME`, `PUBLIC_UPLOAD_PAGE_ENABLED`,
 `PUBLIC_BASE_URL`, `STATE_DB`, `SESSION_SECRET`, `LOG_LEVEL`, `CHUNKED_UPLOADS_ENABLED`,
 `CHUNK_SIZE_MB`, `HOST`, `PORT`). One addition: `CHUNK_DIR` (default `/data/chunks`, which
-the Python version hardcoded).
+the Python version hardcoded). `CHUNK_DIR` is the on-disk upload cache — chunk parts and
+upload spool files live there, file content is never buffered in memory — so mount it as a
+volume (like `/data` for `STATE_DB`) if you want in-flight chunks to survive a container or
+pod recreation.
 
 The build is pure Go (no cgo): `modernc.org/sqlite` is used for SQLite, so
 cross-compilation for Docker images is a plain `GOOS=linux go build`.
@@ -68,13 +71,13 @@ Per the recommendations in [`../docs/rewrite-notes.md`](../docs/rewrite-notes.md
    (column renames), so audit logging and `GET /api/invite/{token}/uploads` work on fresh
    databases too.
 2. **Chunk directory configurable** — `CHUNK_DIR` env var (default unchanged:
-   `/data/chunks`), so chunked uploads work outside Docker.
+   `/data/chunks`), so chunked uploads work outside Docker and the cache can be
+   volume-mounted to survive pod recreation.
 3. **Owner-scoped deletes** — `POST /api/invites/delete` scopes the `upload_events`
    delete to the invite owner, like the invites delete already was.
 4. **`MAX_CONCURRENT` is enforced** — a server-side semaphore limits how many uploads
-   are buffered/forwarded at once (the Python version loaded the setting but never used
-   it). Since files are held in memory during upload, this also bounds peak memory to
-   `MAX_CONCURRENT × file size`.
+   are spooled/forwarded at once (the Python version loaded the setting but never used
+   it).
 5. **Abandoned chunk uploads are garbage-collected** — a background sweep removes chunk
    spool directories with no writes for 24 h (previously they accumulated forever, and
    the unauthenticated chunk endpoints made that a disk-exhaustion vector).
@@ -82,10 +85,11 @@ Per the recommendations in [`../docs/rewrite-notes.md`](../docs/rewrite-notes.md
    the server API key, letting anonymous visitors enumerate album names or flood Immich
    with empty albums. Albums tied to invite uploads are unaffected (they are resolved
    server-side inside the upload pipeline).
-7. **Large uploads** — the Immich upload streams the file bytes (no second in-memory
-   copy of the multipart body), and the upload timeout scales with file size instead of
-   the flat 120 s that capped transfers at ~1 GB. There is deliberately **no upload size
-   limit**; multi-GB videos are expected.
+7. **Large uploads** — file content is never held in memory: whole-file uploads and
+   assembled chunk uploads are spooled to disk under `CHUNK_DIR` and streamed to Immich
+   from there (the Python version buffered the entire file, and all chunks, in RAM). The
+   upload timeout scales with file size instead of the flat 120 s that capped transfers
+   at ~1 GB. There is deliberately **no upload size limit**; multi-GB videos are expected.
 
 Everything else — including quirks like the `"python-"` deviceId prefix, the
 `chunk/complete` invite token coming from the request body, naive-UTC invite expiry
