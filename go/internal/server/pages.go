@@ -68,7 +68,15 @@ func (s *Server) handleInvitePage(w http.ResponseWriter, r *http.Request) {
 	s.serveFrontendFile(w, r, "invite.html")
 }
 
-// handlePing is the connectivity test used by the UI's "Connected" banner.
+// handleHealth is the liveness probe (Docker HEALTHCHECK via the binary's
+// -healthcheck flag). It only asserts the HTTP layer is serving; Immich
+// reachability is deliberately not part of liveness (see /api/ping for that).
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handlePing is the Immich connectivity test behind the "Test connection"
+// button on the login/menu pages.
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	var albumName any
 	if s.cfg.AlbumName != "" {

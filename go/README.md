@@ -33,10 +33,13 @@ When `ADMIN_PORT` is set, the server runs two listeners on the same host address
   `POST /api/invite/{token}/auth`.
 - **`ADMIN_PORT` (admin port):** login and invite management — `/login`, `/menu`,
   `/logout`, `/api/login`, `/api/logout`, `/api/albums`, `/api/invites*`,
-  `PATCH /api/invite/{token}`, `GET /api/invite/{token}/uploads`, `/api/qr`.
+  `PATCH /api/invite/{token}`, `GET /api/invite/{token}/uploads`, `/api/qr`,
+  `POST /api/ping` (the "Test connection" button; its response reveals the Immich base
+  URL, so it stays off the public port), and the `GET /healthz` liveness probe. In
+  single-port mode all of these are served on `PORT` like everything else.
 
-Static assets (`/static/`, `/favicon.ico`) and the probes used by every page
-(`POST /api/ping`, `GET /api/config`) are served on both ports. This lets you expose only
+Static assets (`/static/`, `/favicon.ico`) and the config probe used by every page
+(`GET /api/config`) are served on both ports. This lets you expose only
 the upload port publicly (e.g. through a tunnel/reverse proxy) while keeping the admin UI
 reachable only internally. Notes:
 
@@ -51,6 +54,15 @@ reachable only internally. Notes:
 
 When `ADMIN_PORT` is unset (the default), all endpoints are served on `PORT` exactly as
 before.
+
+### Health check
+
+`GET /healthz` returns `{"ok":true}` when the HTTP layer is up (Immich reachability is
+deliberately not part of liveness — `/api/ping` covers that). Running the binary with
+`-healthcheck` probes the endpoint of an already-running server and exits 0/1; the
+Docker image uses this as its `HEALTHCHECK` command since the distroless runtime has no
+shell or curl. The probe reads the same environment as the server, so it targets
+`ADMIN_PORT` automatically when split-port mode is active.
 
 The build is pure Go (no cgo): `modernc.org/sqlite` is used for SQLite, so
 cross-compilation for Docker images is a plain `GOOS=linux go build`.

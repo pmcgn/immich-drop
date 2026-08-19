@@ -7,10 +7,13 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"immich-drop/internal/config"
 	"immich-drop/internal/server"
@@ -30,8 +33,46 @@ func logLevel(name string) slog.Level {
 	}
 }
 
+// healthProbe hits the running server's /healthz endpoint and returns a
+// process exit code (0 = healthy). Used as the Docker HEALTHCHECK command:
+// the distroless image has no shell or curl, so the binary probes itself.
+// The endpoint lives on the admin port when split-port mode is active.
+func healthProbe(cfg *config.Settings) int {
+	port := cfg.Port
+	if cfg.SplitPorts() {
+		port = cfg.AdminPort
+	}
+	host := cfg.Host
+	// Wildcard listen addresses are not dialable; probe via loopback.
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	url := "http://" + net.JoinHostPort(host, port) + "/healthz"
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck failed:", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck failed: status", resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
 func main() {
+	healthFlag := flag.Bool("healthcheck", false,
+		"probe the running server's health endpoint and exit (0 = healthy)")
+	flag.Parse()
+
 	cfg := config.Load()
+	// Probe mode must not touch the SQLite database or start any listeners.
+	if *healthFlag {
+		os.Exit(healthProbe(cfg))
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel(cfg.LogLevel),
 	})))

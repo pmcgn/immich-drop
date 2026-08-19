@@ -66,11 +66,10 @@ func (s *Server) acquireUploadSlot() func() {
 }
 
 // registerShared adds the routes every page depends on: static assets plus the
-// connectivity/config probes called by header.js on all pages.
+// config probe called by header.js/app.js on all pages.
 func (s *Server) registerShared(mux *http.ServeMux) {
 	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(s.cfg.FrontendDir))))
-	mux.HandleFunc("POST /api/ping", s.handlePing)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
 }
 
@@ -92,8 +91,14 @@ func (s *Server) registerUpload(mux *http.ServeMux) {
 }
 
 // registerAdmin adds the routes needed by the login and invite-management
-// pages (login.html and menu.html).
+// pages (login.html and menu.html). The health probe lives here so that in
+// split-port mode it is served on the internal admin port, not the public one.
 func (s *Server) registerAdmin(mux *http.ServeMux) {
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	// The connection test ("Test connection" button) exists only on the
+	// login/menu pages; its response reveals the Immich base URL, so in
+	// split-port mode it stays off the public upload port.
+	mux.HandleFunc("POST /api/ping", s.handlePing)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("GET /menu", s.handleMenuPage)
 	mux.HandleFunc("GET /logout", s.handleLogoutRedirect)

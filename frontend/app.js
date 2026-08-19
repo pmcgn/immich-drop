@@ -400,8 +400,6 @@ const fi = document.getElementById('fileInput');
 const btnMobilePick = document.getElementById('btnMobilePick');
 const btnClearFinished = document.getElementById('btnClearFinished');
 const btnClearAll = document.getElementById('btnClearAll');
-const btnPing = document.getElementById('btnPing');
-const pingStatus = document.getElementById('pingStatus');
 const banner = document.getElementById('topBanner');
 const btnTheme = document.getElementById('btnTheme');
 const dropHint = document.getElementById('dropHint');
@@ -419,27 +417,6 @@ function showBanner(text, kind='ok'){
   banner.classList.remove('hidden');
   setTimeout(() => banner.classList.add('hidden'), 3000);
 }
-
-// --- Connection test with ephemeral banner ---
-if (btnPing) btnPing.onclick = async () => {
-  pingStatus.textContent = 'checking…';
-  try{
-    const r = await fetch('/api/ping', { method:'POST' });
-    const j = await r.json();
-    pingStatus.textContent = j.ok ? 'Connected' : 'No connection';
-    pingStatus.className = 'ml-2 text-sm ' + (j.ok ? 'text-green-600' : 'text-red-600');
-    if(j.ok){
-      let bannerText = `Connected to Immich at ${j.base_url}`;
-      if(j.album_name) {
-        bannerText += ` | Uploading to album: "${j.album_name}"`;
-      }
-      showBanner(bannerText, 'ok');
-    }
-  }catch{
-    pingStatus.textContent = 'No connection';
-    pingStatus.className='ml-2 text-sm text-red-600';
-  }
-};
 
 // If on invite page, fetch invite info and show context banner
 (async function initInviteBanner(){
