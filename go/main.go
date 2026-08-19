@@ -20,6 +20,13 @@ import (
 	"immich-drop/internal/store"
 )
 
+// version is stamped at build time:
+//
+//	go build -ldflags "-X main.version=x.y.z"
+//
+// The Dockerfile passes it via the VERSION build arg; plain builds show "dev".
+var version = "dev"
+
 func logLevel(name string) slog.Level {
 	switch name {
 	case "DEBUG":
@@ -76,6 +83,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel(cfg.LogLevel),
 	})))
+	slog.Info("immich-drop version " + version + " started")
 
 	st, err := store.Open(cfg.StateDB)
 	if err != nil {

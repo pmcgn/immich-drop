@@ -10,9 +10,14 @@ COPY go/go.mod go/go.sum ./
 RUN go mod download
 
 COPY go/ ./
+# Version string stamped into the binary (shown in the startup log).
+# The release workflow sets this from the git tag; local builds get "dev".
+ARG VERSION=dev
 # Pure Go (modernc.org/sqlite, no cgo) -> a fully static binary that runs on
 # distroless/static.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/immich-drop .
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/immich-drop .
 
 # Distroless has no shell, so the writable data directory (SQLite state.db +
 # chunk spool) must be prepared here and copied in with the right owner.
