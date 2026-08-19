@@ -6,10 +6,10 @@ FROM golang:1.24-alpine AS build
 WORKDIR /src
 
 # Dependencies first, so they cache independently of source changes.
-COPY go/go.mod go/go.sum ./
+COPY go-backend/go.mod go-backend/go.sum ./
 RUN go mod download
 
-COPY go/ ./
+COPY go-backend/ ./
 # Version string stamped into the binary (shown in the startup log).
 # The release workflow sets this from the git tag; local builds get "dev".
 ARG VERSION=dev

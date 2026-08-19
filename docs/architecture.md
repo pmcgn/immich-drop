@@ -1,6 +1,8 @@
 # Architecture
 
-Source of truth: `app/app.py` (~1780 lines, single module), `app/config.py`, `main.py`.
+Source of truth at the time of writing: `app/app.py` (~1780 lines, single module),
+`app/config.py`, `main.py` — the Python implementation has since been removed; this
+document describes the behavior contract the Go backend (`go-backend/`) implements.
 
 ```
 Browser (frontend/*.html, app.js)
@@ -164,7 +166,7 @@ Loaded once at import time (`app/config.py`, `load_settings()`), from environmen
 | `CHUNKED_UPLOADS_ENABLED` | `false` | Advertised to the frontend via `/api/config` |
 | `CHUNK_SIZE_MB` | `95` | Chunk size advertised to the frontend |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Listen address (read in `main.py` only) |
-| `ADMIN_PORT` | unset | **Optional, Go backend only.** When set, admin endpoints (login/menu/invite management) move to this port and `PORT` serves only the public upload endpoints; unset = everything on `PORT`. See [`go/README.md`](../go/README.md) for the exact route split |
+| `ADMIN_PORT` | unset | **Optional.** When set, admin endpoints (login/menu/invite management) move to this port and `PORT` serves only the public upload endpoints; unset = everything on `PORT`. See [`go-backend/README.md`](../go-backend/README.md) for the exact route split |
 
 Boolean parsing accepts `1/true/yes/on` (case-insensitive).
 

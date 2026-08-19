@@ -22,12 +22,8 @@ services:
 
     volumes:
       - immich_drop_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request,sys\ntry:\n  urllib.request.urlopen('http://localhost:8080/').read(); sys.exit(0)\nexcept Exception:\n  sys.exit(1)\nPY"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # No healthcheck block needed: the image ships its own HEALTHCHECK
+    # (the binary probes its /healthz endpoint).
 
 volumes:
   immich_drop_data:

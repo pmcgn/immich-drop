@@ -1,9 +1,10 @@
 // Immich Drop Uploader – Backend (Go)
 //
-// Go rewrite of the Python/FastAPI backend (app/app.py). Serves the unchanged
-// static frontend, uploads to Immich using .env configuration only, performs
-// duplicate checks (local SHA-1 cache + Immich bulk-check), and pushes
-// per-session upload progress over WebSocket.
+// Originally a rewrite of the Python/FastAPI backend (removed from the repo;
+// docs/ preserves its behavior as the spec). Serves the static frontend,
+// uploads to Immich using .env configuration only, performs duplicate checks
+// (local SHA-1 cache + Immich bulk-check), and pushes per-session upload
+// progress over WebSocket.
 package main
 
 import (

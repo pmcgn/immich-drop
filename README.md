@@ -78,13 +78,8 @@ services:
     volumes:
       - immich_drop_data:/data
 
-    # Simple healthcheck
-    healthcheck:
-      test: ["CMD-SHELL", "python - <<'PY'\nimport os,urllib.request,sys; url=f\"http://127.0.0.1:{os.getenv('PORT','8080')}/\";\ntry: urllib.request.urlopen(url, timeout=3); sys.exit(0)\nexcept Exception: sys.exit(1)\nPY"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # No healthcheck block needed: the image ships its own HEALTHCHECK
+    # (the binary probes its /healthz endpoint).
 
 volumes:
   immich_drop_data:
@@ -148,11 +143,12 @@ Roadmap highlight
 ## Architecture
 
 - **Frontend:** static HTML/JS (Tailwind). Drag & drop or "Choose files", queue UI with progress and status chips.  
-- **Backend:** FastAPI + Uvicorn.  
+- **Backend:** Go (see [`go-backend/README.md`](go-backend/README.md)).  
   - Proxies uploads to Immich `/assets`  
   - Computes SHA‑1 and checks a local SQLite cache (`state.db`)  
   - Optional Immich de‑dupe via `/assets/bulk-upload-check`  
   - WebSocket `/ws` pushes per‑item progress to the current browser session only  
+  - Optional split-port mode (`ADMIN_PORT`) to keep the admin UI off the public port  
 - **Persistence:** local SQLite (`state.db`) prevents re‑uploads across sessions/runs.
 
 ---
@@ -161,9 +157,9 @@ Roadmap highlight
 
 ```
 immich_drop/
-├─ app/                     # FastAPI application (Python package)
-│  ├─ app.py                # ASGI app (uvicorn entry: app.app:app)
-│  └─ config.py             # Settings loader (reads .env/env)
+├─ go-backend/              # Go backend (see go-backend/README.md)
+│  ├─ main.go               # Entrypoint
+│  └─ internal/             # config, server, store, immich client, ...
 ├─ frontend/                # Static UI (served at /static)
 │  ├─ index.html            # Public uploader (optional)
 │  ├─ login.html            # Login page (admin)
@@ -172,10 +168,9 @@ immich_drop/
 │  ├─ app.js                # Uploader logic (drop/queue/upload/ws)
 │  ├─ header.js             # Shared header (theme + ping + banner)
 │  └─ favicon.png           # Tab icon (optional)
+├─ docs/                    # API/behavior specification (openapi.yaml, ...)
 ├─ data/                    # Local dev data dir (bind to /data in Docker)
-├─ main.py                  # Thin dev entrypoint (python main.py)
-├─ requirements.txt         # Python dependencies
-├─ Dockerfile
+├─ Dockerfile               # Multi-stage build -> distroless image
 ├─ docker-compose.yml
 ├─ .env.example             # Example dev environment (optional)
 ├─ README.md
@@ -186,7 +181,7 @@ immich_drop/
 
 ## Requirements
 
-- **Python** 3.11
+- **Go** 1.24+ (or just Docker)
 - An **Immich** server + **API key**
 
 ---
@@ -194,13 +189,13 @@ immich_drop/
 
 ## Development
 
-Run with live reload:
-
 ```bash
-python main.py
+cd go-backend
+go build -o immich-drop .
+./immich-drop            # reads .env / environment
 ```
 
-The backend contains docstrings so you can generate docs later if desired.
+See [`go-backend/README.md`](go-backend/README.md) for backend details.
 
 ---
 
@@ -211,7 +206,7 @@ The backend contains docstrings so you can generate docs later if desired.
 HOST=0.0.0.0
 PORT=8080
 
-# Optional (Go backend only): split-port mode. When set, admin endpoints
+# Optional: split-port mode. When set, admin endpoints
 # (login, menu, invite management) are served on this port and PORT serves only
 # the public upload endpoints — useful to expose only the upload port publicly.
 # Leave unset (default) to serve everything on PORT.

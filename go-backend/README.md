@@ -1,15 +1,17 @@
 # Immich Drop Uploader — Go backend
 
-A Go rewrite of the Python/FastAPI backend ([`app/app.py`](../app/app.py)). It serves the
-**unchanged** frontend from [`../frontend`](../frontend) and preserves every route, request/response
-shape, error code, and the WebSocket progress protocol (see [`../docs/openapi.yaml`](../docs/openapi.yaml),
-[`../docs/websocket.md`](../docs/websocket.md), and [`../docs/rewrite-notes.md`](../docs/rewrite-notes.md)).
-Existing `state.db` files, invite password hashes, and `.env` configurations keep working.
+The immich-drop backend. Originally a Go rewrite of the Python/FastAPI backend (removed
+from the repo; [`../docs/`](../docs/) preserves its behavior as the specification). It
+serves the frontend from [`../frontend`](../frontend) and preserves every route,
+request/response shape, error code, and the WebSocket progress protocol of the original
+(see [`../docs/openapi.yaml`](../docs/openapi.yaml), [`../docs/websocket.md`](../docs/websocket.md),
+and [`../docs/rewrite-notes.md`](../docs/rewrite-notes.md)). `state.db` files, invite
+password hashes, and `.env` configurations from the Python era keep working.
 
 ## Run
 
 ```sh
-cd go
+cd go-backend
 go build -o immich-drop .
 ./immich-drop            # reads .env / environment, same variables as the Python version
 ```

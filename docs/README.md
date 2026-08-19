@@ -1,9 +1,10 @@
 # Immich Drop – Backend Documentation
 
-This folder documents the current Python/FastAPI backend (`app/app.py`, `app/config.py`, `main.py`).
-Its primary purpose is to serve as the **specification for a rewrite of the backend in Go**. The
-frontend (static files in `frontend/`) stays as-is, so the HTTP + WebSocket contract described here
-must be preserved exactly.
+This folder documents the original Python/FastAPI backend (`app/app.py`, `app/config.py`,
+`main.py` — since removed from the repo). It served as the **specification for the Go
+rewrite**, which now lives in [`../go-backend/`](../go-backend/) and implements the HTTP +
+WebSocket contract described here. The frontend (static files in `frontend/`) is shared,
+so this contract remains the reference.
 
 | Document | Contents |
 | --- | --- |
