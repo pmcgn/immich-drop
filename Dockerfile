@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- Stage 1: build the Go backend ----
-FROM golang:1.24-alpine AS build
+FROM golang:1.27.0 AS build
 
 WORKDIR /src
 
@@ -26,7 +26,7 @@ RUN mkdir -p /out/data
 # ---- Stage 2: minimal runtime image ----
 # distroless/static: no shell, no package manager, no libc; ships CA certs and
 # tzdata. The :nonroot tag runs as uid 65532 by default.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 
 WORKDIR /app
 
