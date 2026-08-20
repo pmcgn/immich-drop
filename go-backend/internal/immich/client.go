@@ -140,14 +140,18 @@ func (c *Client) AddAssetToAlbum(accessToken, albumID, assetID string) bool {
 	status, body, err := c.doJSON(http.MethodPut, "/albums/"+albumID+"/assets", accessToken,
 		map[string]any{"ids": []string{assetID}}, 10*time.Second)
 	if err != nil {
-		slog.Error("error adding asset to album", "err", err)
+		slog.Error("error adding asset to album", "album", albumID, "asset", assetID, "err", err)
 		return false
 	}
 	if status != http.StatusOK {
+		slog.Warn("album add rejected", "album", albumID, "asset", assetID,
+			"status", status, "body", strings.TrimSpace(string(body)))
 		return false
 	}
 	var results []map[string]any
 	if err := json.Unmarshal(body, &results); err != nil {
+		slog.Warn("album add returned unexpected body", "album", albumID, "asset", assetID,
+			"body", strings.TrimSpace(string(body)))
 		return false
 	}
 	for _, res := range results {
@@ -158,6 +162,8 @@ func (c *Client) AddAssetToAlbum(accessToken, albumID, assetID string) bool {
 			return true
 		}
 	}
+	slog.Warn("album add accepted no asset", "album", albumID, "asset", assetID,
+		"body", strings.TrimSpace(string(body)))
 	return false
 }
 

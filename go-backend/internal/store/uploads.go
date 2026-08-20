@@ -28,6 +28,23 @@ func (s *Store) HasDeviceAsset(deviceAssetID string) (bool, error) {
 	return false, err
 }
 
+// CachedAssetID returns the Immich asset id recorded for this checksum or
+// deviceAssetID, or nil when no matching row (or no id) is stored. Rows with
+// a known id are preferred over rows where it was never recorded.
+func (s *Store) CachedAssetID(checksum, deviceAssetID string) (*string, error) {
+	var id *string
+	err := s.db.QueryRow(
+		"SELECT immich_asset_id FROM uploads WHERE checksum = ? OR device_asset_id = ? ORDER BY immich_asset_id IS NULL LIMIT 1",
+		checksum, deviceAssetID).Scan(&id)
+	if isNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
 // InsertUpload records a newly-uploaded asset in the local cache (ignoring duplicates).
 func (s *Store) InsertUpload(checksum, filename string, size int64, deviceAssetID string, immichAssetID *string, createdAt string) error {
 	_, err := s.db.Exec(

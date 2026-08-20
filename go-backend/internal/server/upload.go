@@ -186,15 +186,20 @@ func (s *Server) runUploadPipeline(w http.ResponseWriter, r *http.Request, in up
 	}
 	deviceAssetID := fmt.Sprintf("%s-%d-%d", in.fileName, lm, size)
 
-	// Local duplicate checks.
+	// Local duplicate checks. Duplicates still get placed into the invite's
+	// album (finishDuplicate) so re-sent files land where the invite points.
+	localDupMsg := ""
 	if found, err := s.store.HasChecksum(checksum); err == nil && found {
-		s.sendProgress(in.sessionID, in.itemID, "duplicate", 100, "Duplicate (by checksum - local cache)", nil)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate", "id": nil})
-		return
+		localDupMsg = "Duplicate (by checksum - local cache)"
+	} else if found, err := s.store.HasDeviceAsset(deviceAssetID); err == nil && found {
+		localDupMsg = "Already uploaded from this device (local cache)"
 	}
-	if found, err := s.store.HasDeviceAsset(deviceAssetID); err == nil && found {
-		s.sendProgress(in.sessionID, in.itemID, "duplicate", 100, "Already uploaded from this device (local cache)", nil)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate", "id": nil})
+	if localDupMsg != "" {
+		cachedID, err := s.store.CachedAssetID(checksum, deviceAssetID)
+		if err != nil {
+			slog.Error("dedupe cache lookup failed", "err", err)
+		}
+		s.finishDuplicate(w, sess, in, localDupMsg, strOr(cachedID))
 		return
 	}
 
@@ -210,8 +215,7 @@ func (s *Server) runUploadPipeline(w http.ResponseWriter, r *http.Request, in up
 		if err := s.store.InsertUpload(checksum, in.fileName, size, deviceAssetID, assetIDPtr, createdISO); err != nil {
 			slog.Error("dedupe cache insert failed", "err", err)
 		}
-		s.sendProgress(in.sessionID, in.itemID, "duplicate", 100, "Duplicate (server)", assetID)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate", "id": nullable(assetID)})
+		s.finishDuplicate(w, sess, in, "Duplicate (server)", assetID)
 		return
 	}
 
@@ -279,15 +283,7 @@ func (s *Server) runUploadPipeline(w http.ResponseWriter, r *http.Request, in up
 	// without an album deliberately does not fall back to the env default.
 	if assetID != "" {
 		if in.inviteToken != "" {
-			if strOr(targetAlbumID) != "" || strOr(targetAlbumName) != "" {
-				if s.addAssetToAlbum(sess.AccessToken, assetID, targetAlbumID, targetAlbumName) {
-					name := strOr(targetAlbumName)
-					if name == "" {
-						name = strOr(targetAlbumID)
-					}
-					status += fmt.Sprintf(" (added to album '%s')", name)
-				}
-			}
+			status += s.inviteAlbumSuffix(sess.AccessToken, assetID, targetAlbumID, targetAlbumName)
 		} else if s.cfg.AlbumName != "" {
 			if s.addAssetToAlbum(sess.AccessToken, assetID, nil, nil) {
 				status += fmt.Sprintf(" (added to album '%s')", s.cfg.AlbumName)
@@ -447,4 +443,57 @@ func (s *Server) gateInvite(w http.ResponseWriter, sess *session.Data, sessionID
 		}
 	}
 	return inv.AlbumID, inv.AlbumName, true
+}
+
+// inviteAlbumTarget passively resolves an invite's target album for
+// duplicate-path album assignment: no claim, no usage increment, no error
+// responses. Returns nils when the token is absent, unknown, has no album,
+// or is not currently usable by this session.
+func (s *Server) inviteAlbumTarget(sess *session.Data, sessionID, token string) (albumID, albumName *string) {
+	if token == "" {
+		return nil, nil
+	}
+	inv, err := s.store.GetInvite(token)
+	if err != nil {
+		slog.Error("invite lookup error", "err", err)
+		return nil, nil
+	}
+	if inv == nil || s.inviteUsable(inv, sess, sessionID, token) != "" {
+		return nil, nil
+	}
+	return inv.AlbumID, inv.AlbumName
+}
+
+// inviteAlbumSuffix adds assetID to the invite's target album and returns the
+// user-visible status suffix, or "" when there is no album target or the add
+// failed (the failure itself is logged in the Immich client).
+func (s *Server) inviteAlbumSuffix(accessToken, assetID string, albumID, albumName *string) string {
+	if assetID == "" || (strOr(albumID) == "" && strOr(albumName) == "") {
+		return ""
+	}
+	if !s.addAssetToAlbum(accessToken, assetID, albumID, albumName) {
+		slog.Warn("invite album assignment failed", "asset", assetID,
+			"albumId", strOr(albumID), "albumName", strOr(albumName))
+		return ""
+	}
+	name := strOr(albumName)
+	if name == "" {
+		name = strOr(albumID)
+	}
+	return fmt.Sprintf(" (added to album '%s')", name)
+}
+
+// finishDuplicate ends the pipeline for an already-uploaded file. Unlike a
+// plain skip, the invite's target album is still applied so re-sent files
+// land in the album the invite points at (the asset already exists, so the
+// invite is not claimed and its usage is not counted). assetID may be ""
+// when the local cache has no Immich id recorded; the album add is then
+// impossible and skipped.
+func (s *Server) finishDuplicate(w http.ResponseWriter, sess *session.Data, in uploadInput, msg, assetID string) {
+	if assetID != "" && in.inviteToken != "" {
+		albumID, albumName := s.inviteAlbumTarget(sess, in.sessionID, in.inviteToken)
+		msg += s.inviteAlbumSuffix(sess.AccessToken, assetID, albumID, albumName)
+	}
+	s.sendProgress(in.sessionID, in.itemID, "duplicate", 100, msg, nullable(assetID))
+	writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate", "id": nullable(assetID)})
 }
