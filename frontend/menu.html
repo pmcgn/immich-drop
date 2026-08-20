@@ -3,16 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
   <title>Menu – Immich Drop</title>
   <link rel="icon" type="image/png" href="/static/favicon.png" />
-  <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    tailwind.config = { darkMode: 'class' };
+    // Apply the theme before first paint to avoid a light-mode flash.
+    try{var t=localStorage.getItem('theme');if(t==='dark'||(!t&&matchMedia('(prefers-color-scheme: dark)').matches))document.documentElement.classList.add('dark');}catch(e){}
   </script>
+  <link rel="stylesheet" href="/static/tailwind.css" />
 </head>
 <body class="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
   <div class="mx-auto max-w-2xl p-6 space-y-6">
-    <div id="topBanner" class="hidden rounded-2xl border border-green-200 bg-green-50 p-3 text-green-700 text-center dark:bg-green-900 dark:border-green-700 dark:text-green-300"></div>
+    <div id="topBanner" role="status" aria-live="polite" class="hidden rounded-2xl border border-green-200 bg-green-50 p-3 text-green-700 text-center dark:bg-green-900 dark:border-green-700 dark:text-green-300"></div>
     <header class="flex items-center justify-between">
       <h1 class="text-2xl font-semibold">Create Upload Link</h1>
       <div class="flex items-center gap-2">

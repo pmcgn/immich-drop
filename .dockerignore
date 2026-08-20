@@ -16,6 +16,8 @@ build/
 .vscode/
 .DS_Store
 
+node_modules/
+
 # Local data, screenshots, and env files
 data/
 screenshot.png

@@ -32,3 +32,6 @@ state.db
 
 # Logs
 *.log
+
+# Node (only used for the Tailwind CLI; no package.json is committed)
+node_modules/

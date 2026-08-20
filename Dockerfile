@@ -23,6 +23,17 @@ RUN CGO_ENABLED=0 go build -trimpath \
 # chunk spool) must be prepared here and copied in with the right owner.
 RUN mkdir -p /out/data
 
+# ---- Stage 1b: compile the Tailwind stylesheet ----
+# frontend/tailwind.css is committed for local dev, but the image rebuilds it
+# so shipped CSS can never be stale relative to the HTML/JS it styles.
+FROM node:22-alpine AS css
+
+WORKDIR /src
+COPY tailwind.config.js ./
+COPY frontend/ ./frontend/
+RUN npx --yes tailwindcss@3.4.17 -c tailwind.config.js \
+    -i frontend/tailwind.input.css -o /out/tailwind.css --minify
+
 # ---- Stage 2: minimal runtime image ----
 # distroless/static: no shell, no package manager, no libc; ships CA certs and
 # tzdata. The :nonroot tag runs as uid 65532 by default.
@@ -32,6 +43,7 @@ WORKDIR /app
 
 COPY --from=build /out/immich-drop /app/immich-drop
 COPY frontend/ /app/frontend/
+COPY --from=css /out/tailwind.css /app/frontend/tailwind.css
 # 65532 = nonroot; numeric so the chown doesn't depend on /etc/passwd lookups.
 COPY --from=build --chown=65532:65532 /out/data /data
 
