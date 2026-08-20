@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- Stage 1: build the Go backend ----
-FROM golang:1.27.0 AS build
+# --platform=$BUILDPLATFORM: run the compiler natively and cross-compile via
+# GOOS/GOARCH instead of emulating the target CPU under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS build
 
 WORKDIR /src
 
@@ -13,9 +15,11 @@ COPY go-backend/ ./
 # Version string stamped into the binary (shown in the startup log).
 # The release workflow sets this from the git tag; local builds get "dev".
 ARG VERSION=dev
+# Target platform, provided by buildx (e.g. linux/arm64 -> TARGETARCH=arm64).
+ARG TARGETOS TARGETARCH
 # Pure Go (modernc.org/sqlite, no cgo) -> a fully static binary that runs on
 # distroless/static.
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/immich-drop .
 
@@ -26,7 +30,9 @@ RUN mkdir -p /out/data
 # ---- Stage 1b: compile the Tailwind stylesheet ----
 # frontend/tailwind.css is committed for local dev, but the image rebuilds it
 # so shipped CSS can never be stale relative to the HTML/JS it styles.
-FROM node:22-alpine AS css
+# --platform=$BUILDPLATFORM: CSS output is architecture-independent, so this
+# stage runs once natively and is shared by all target platforms.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS css
 
 WORKDIR /src
 COPY tailwind.config.js ./
