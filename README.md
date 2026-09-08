@@ -162,7 +162,6 @@ volumes:
   immich_drop_data:
 ```
 
-```
 ### CLI
 ```bash
 docker compose pull
@@ -230,6 +229,7 @@ immich_drop/
 
 ```bash
 cd go-backend
+cp ../.env.example .env  # .env is read from the working directory
 go build -o immich-drop .
 ./immich-drop            # reads .env / environment
 ```
@@ -240,8 +240,14 @@ See [`go-backend/README.md`](go-backend/README.md) for backend details.
 
 ## Dev Configuration (.env)
 
+The binary loads `.env` from its **working directory**, so place the file next to
+where you start it — `go-backend/.env` when following the quickstart above.
+Relative paths in it resolve against that same directory. Docker images ignore
+`.env` (it is excluded from the build context); configure those via
+`docker-compose.yml`.
+
 ```ini
-# Server (dev only)
+# Server
 HOST=0.0.0.0
 PORT=8080
 
@@ -263,8 +269,8 @@ PUBLIC_UPLOAD_PAGE_ENABLED=TRUE
 # Album (optional): auto-add uploads from public uploader to this album (creates if needed)
 IMMICH_ALBUM_NAME=dead-drop
 
-# Local dedupe cache (SQLite)
-STATE_DB=./data/state.db
+# Local dedupe cache (SQLite). Default in the image: /data/state.db
+STATE_DB=../data/state.db
 
 # Base URL for generating absolute invite links (recommended for production)
 # e.g., PUBLIC_BASE_URL=https://photos.example.com
@@ -277,11 +283,15 @@ LOG_LEVEL=DEBUG
 # Chunked uploads (optional)
 CHUNKED_UPLOADS_ENABLED=true
 CHUNK_SIZE_MB=95
+# Spool directory for in-flight chunks. Default in the image: /data/chunks
+CHUNK_DIR=../data/chunks
 
+# Static frontend directory (optional). Auto-detected in dev; the image sets
+# it to /app/frontend.
+#FRONTEND_DIR=../frontend
 ```
 
-
-You can keep a checked‑in `/.env.example` with the keys above for onboarding.
+These keys are also kept in [`.env.example`](.env.example) for onboarding.
 
 ---
 
