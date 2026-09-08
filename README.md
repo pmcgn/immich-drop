@@ -1,9 +1,79 @@
 # Immich Drop Uploader
 
+> [!NOTE]
+> **Fork of [nasogaa/immich-drop](https://github.com/nasogaa/immich-drop).** The Python
+> backend has been rewritten in Go and hardened for internet-facing use: uploads and the
+> WebSocket now require a valid invite, admin pages can run on a separate port, and large
+> files are chunked to disk with end-to-end checksum verification.
+> See [About this fork](#about-this-fork) for the full list.
+
 A tiny web app for collecting photos/videos into your **Immich** server.
 Admin users log in to create public invite links; invite links are always public-by-URL. A public uploader page is optional and disabled by default.
 
 ![Immich Drop Uploader Dark Mode UI](./screenshot.png)
+
+---
+
+## About this fork
+
+This is a fork of [nasogaa/immich-drop](https://github.com/nasogaa/immich-drop). The
+upstream project is a Python/FastAPI app; this fork **replaces the backend with a Go
+implementation** and hardens it for running on the public internet. The frontend, the
+HTTP/WebSocket API and the on-disk SQLite schema stayed compatible during the rewrite
+(see [`docs/rewrite-notes.md`](docs/rewrite-notes.md)), so an existing `state.db` keeps working.
+
+Images are published from this fork as `ghcr.io/pmcgn/immich-drop`.
+
+### Go backend instead of Python
+
+- Complete rewrite of Backend in Go 
+- Pure-Go SQLite (`modernc.org/sqlite`, no cgo) → a single static binary, no Python
+  runtime, no interpreter dependencies.
+- Structured logging (`slog`) with `LOG_LEVEL`, and the build version stamped into the
+  startup log.
+
+### Security hardening
+
+- **Uploads require auth.** With `PUBLIC_UPLOAD_PAGE_ENABLED=false`, every upload and
+  chunk request must carry a valid, active invite token or come from a logged-in
+  session. Requests are rejected *before* anything is written to disk or forwarded to
+  Immich.
+- **WebSocket is authenticated too.** The `/ws` registration frame carries the invite
+  token and is subject to the same rule; unauthorized sockets are closed (code 1008).
+  The first frame must arrive within 10 s, and per-session socket limits prevent a
+  client from growing the hub unboundedly.
+- **Strict input validation** on invite tokens, session/item ids, chunk indices and
+  album ids, plus WebSocket origin checking.
+- **Admin/public port split.** Optional `ADMIN_PORT` serves login, menu and invite
+  management on a separate port, so only the upload port needs to be exposed to the
+  internet.
+- **Information leaks removed.** The ping banner used to reveal the Immich base URL and
+  the default album name; it is gone.
+- Session cookies are automatically marked `Secure` when `PUBLIC_BASE_URL` uses `https://`.
+- **Distroless Base Container**. Reduction of attack surface. No packet manager or tools are part of the container.
+
+### Uploads & reliability
+
+- **Chunked uploads spool to disk** (`CHUNK_DIR`, default `/data/chunks`) instead of
+  RAM, so files larger than the server's memory can be uploaded.
+- **End-to-end checksum verification**: the hash is compared before and after the
+  transfer to catch corruption introduced by chunking.
+- Upload pipeline no longer blocks indefinitely on stalled TCP connections.
+- **Album fix**: files detected as duplicates are still added to the album the invite
+  points at, instead of being silently dropped; album failures are now logged with the
+  album/asset id and the Immich response.
+
+### Container & release
+
+- **Multi-stage Dockerfile** producing a distroless, non-root image with a built-in
+  `HEALTHCHECK` (the binary probes its own `/healthz`, and knows about split-port mode).
+- **Multi-arch releases** (amd64 + arm64) via a GitHub Actions workflow triggered by
+  `v*.*.*` tags, publishing to GHCR with semver tags.
+- **`GET /healthz` health endpoint** returning `{"ok": true}` — usable as a Kubernetes
+  liveness/readiness probe (or for any other orchestrator / load balancer). It needs no
+  authentication and does not touch Immich, so it stays green while Immich is down. In
+  split-port mode it is served on `ADMIN_PORT`, so point the probe at the admin port.
+
 
 ## Features
 
@@ -70,9 +140,16 @@ services:
       # App internals
       SESSION_SECRET: ${SESSION_SECRET}
 
+      # Ports: PORT serves the public upload endpoints, the optional
+      # ADMIN_PORT serves login/menu/invite management. Remove ADMIN_PORT
+      # to serve everything on PORT.
+      PORT: 8080
+      ADMIN_PORT: 8081
+
     # Expose the app on the host
     ports:
-      - 8080:8080
+      - 8080:8080   # same as PORT
+      - 8081:8081   # same as ADMIN_PORT. Remove if not used
 
     # Persist local dedupe cache (state.db) across restarts
     volumes:
@@ -91,44 +168,6 @@ volumes:
 docker compose pull
 docker compose up -d
 ```
----
-
-## What's New
-
-### v0.5.0 – Manage Links overhaul
-- In-panel bulk actions footer (Delete/Enable/Disable stay inside the box)
-- Per-row icon actions with tooltips; Save button lights up only on changes
-- Per-row QR modal; Details modal close fixed and reliable
-- Auto-refresh after creating a link; new row is highlighted and scrolled into view
-- Expiry save fix: stores end-of-day to avoid off-by-one date issues
-
-Roadmap highlight
-- We’d like to add a per-user UI and remove reliance on a fixed API key by allowing users to authenticate and provide their own Immich API tokens. This is not in scope for the initial versions but aligns with future direction.
-- The frontend automatically switches to chunked mode only for files larger than the configured chunk size.
-
-### 📱 Device‑Flexible HMI (New)
-- Fully responsive UI with improved spacing and wrapping for small and large screens.
-- Mobile‑safe file picker and a sticky bottom “Choose files” bar on phones.
-- Safe‑area padding for devices with notches; refined dark/light theme behavior.
-- Desktop keeps the dropzone clickable; touch devices avoid accidental double‑open.
-
-### ♻️ Reliability & Quality of Life (New)
-- Retry button to re‑attempt any failed upload without re‑selecting the file.
-- Progress and status updates are more resilient to late/reordered WebSocket events.
-- Invites can be created without an album, keeping uploads unassigned when preferred.
-
-### Last 8 Days – Highlights
-- Added chunked uploads with configurable chunk size.
-- Added optional passwords for invite links with in‑UI unlock prompt.
-- Responsive HMI overhaul: mobile‑safe picker, sticky mobile action bar, safe‑area support.
-- Retry for failed uploads and improved progress handling.
-- Support for invites with no album association.
-
-### 🌙 Dark Mode
-- Automatic or manual toggle; persisted preference
-
-### 📁 Album Integration
-- Auto-create + assign album if configured; optional invites without album
 
 ---
 
