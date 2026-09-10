@@ -32,6 +32,18 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	s.serveFrontendFile(w, r, "login.html")
 }
 
+// handleAdminRoot serves "/" on the admin port in split-port mode, where
+// registerUpload (and its "/" -> index.html/login handling) isn't mounted.
+// Without this, hitting the admin port's root 404s instead of landing on
+// login/menu.
+func (s *Server) handleAdminRoot(w http.ResponseWriter, r *http.Request) {
+	if s.sessions.Get(r).AccessToken != "" {
+		http.Redirect(w, r, "/menu", http.StatusTemporaryRedirect)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
+}
+
 // handleMenuPage serves the invite-management page; requires a login session.
 func (s *Server) handleMenuPage(w http.ResponseWriter, r *http.Request) {
 	if s.sessions.Get(r).AccessToken == "" {

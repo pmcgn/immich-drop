@@ -140,6 +140,9 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerShared(mux)
 	s.registerAdmin(mux)
+	// registerUpload (which owns "/" in single-port mode) isn't mounted here,
+	// so give the admin port its own root redirect instead of a bare 404.
+	mux.HandleFunc("GET /{$}", s.handleAdminRoot)
 	return corsMiddleware(mux)
 }
 
