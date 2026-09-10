@@ -155,7 +155,7 @@
         .replaceAll("'",'&#39;');
     }
 
-    function showResult(kind, text){
+    function showResult(kind){
       result.className = 'rounded-xl border p-3 text-sm space-y-2 ' + (kind==='ok' ? 'border-green-200 bg-green-50 text-green-700 dark:bg-green-900 dark:border-green-700 dark:text-green-300' : 'border-red-200 bg-red-50 text-red-700 dark:bg-red-900 dark:border-red-700 dark:text-red-300');
       result.classList.remove('hidden');
     }
@@ -187,10 +187,10 @@
       try{
         const r = await fetch('/api/albums', { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({ name }) });
         const j = await r.json().catch(()=>({}));
-        if(!r.ok){ showResult('err', j.error || 'Album create failed'); return; }
-        showResult('ok', `Album created: ${j.albumName || j.id || name}`);
+        if(!r.ok){ window.__header.showBanner(j.error || 'Album create failed', 'err'); return; }
+        window.__header.showBanner(`Album created: ${j.albumName || j.id || name}`, 'ok');
         try { await loadAlbums(); } catch {}
-      }catch(err){ showResult('err', String(err)); }
+      }catch(err){ window.__header.showBanner(String(err), 'err'); }
     };
 
     btnCreate.onclick = async () => {
@@ -209,16 +209,16 @@
       try{
         const r = await fetch('/api/invites', { method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify(payload) });
         const j = await r.json().catch(()=>({}));
-        if(!r.ok){ showResult('err', j.error || 'Failed to create link'); return; }
+        if(!r.ok){ window.__header.showBanner(j.error || 'Failed to create link', 'err'); return; }
         const link = j.absoluteUrl || (location.origin + j.url);
-        showResult('ok', '');
         linkOut.value = link;
         // Build QR via backend PNG generator (no external libs)
         qrImg.src = `/api/qr?text=${encodeURIComponent(link)}`;
+        showResult('ok');
         // Also refresh the managed links list and highlight the new entry
         if (j && j.token) { try { LAST_CREATED_TOKEN = j.token; } catch {} }
         try { await loadInvites(); } catch {}
-      }catch(err){ showResult('err', String(err)); }
+      }catch(err){ window.__header.showBanner(String(err), 'err'); }
     };
 
     // Logout handled via plain link to /logout (clears session + redirects)
