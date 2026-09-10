@@ -59,6 +59,13 @@ func (s *Server) handleLogoutRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
 }
 
+// handleServiceWorker serves the admin PWA's service worker from the root
+// path (not /static/) so its default scope covers /login and /menu.
+func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	s.serveFrontendFile(w, r, "sw-admin.js")
+}
+
 // handleFavicon serves /static/favicon.png if present (avoids 404 noise).
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.cfg.FrontendDir, "favicon.png")

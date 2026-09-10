@@ -6,6 +6,12 @@
   <meta name="color-scheme" content="light dark" />
   <title>Login – Immich Drop</title>
   <link rel="icon" type="image/png" href="/static/favicon.png" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#111827" />
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Drop Admin" />
   <script>
     // Apply the theme before first paint to avoid a light-mode flash.
     try{var t=localStorage.getItem('theme');if(t==='dark'||(!t&&matchMedia('(prefers-color-scheme: dark)').matches))document.documentElement.classList.add('dark');}catch(e){}
@@ -51,6 +57,11 @@
     </div>
   </div>
   <script src="/static/header.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw-admin.js', { scope: '/' }).catch(()=>{});
+    }
+  </script>
   <script>
     const form = document.getElementById('loginForm');
     const msg = document.getElementById('msg');

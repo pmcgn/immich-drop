@@ -94,6 +94,9 @@ func (s *Server) registerUpload(mux *http.ServeMux) {
 // pages (login.html and menu.html). The health probe lives here so that in
 // split-port mode it is served on the internal admin port, not the public one.
 func (s *Server) registerAdmin(mux *http.ServeMux) {
+	// Served at the root (not /static/) so the service worker's default
+	// scope covers /login and /menu.
+	mux.HandleFunc("GET /sw-admin.js", s.handleServiceWorker)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	// The connection test ("Test connection" button) exists only on the
 	// login/menu pages; its response reveals the Immich base URL, so in
